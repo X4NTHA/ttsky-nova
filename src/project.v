@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2024 Your Name
+ * Copyright (c) 2026 X4NTHA, x4ntha.com
  * SPDX-License-Identifier: Apache-2.0
  */
 
 `default_nettype none
 
-module tt_um_example (
+module tt_um_x4ntha_nova (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // IOs: Input path
@@ -16,12 +16,67 @@ module tt_um_example (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+    wire spi_cs0_n;
+    wire spi_cs1_n;
+    wire spi_sck;
+    wire spi_mosi;
+    wire spi_miso;
+    wire uart_tx;
+    wire [6:0] blinkenlights;
 
-  // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+    // Dedicated Outputs
+    assign uo_out[0]   = uart_tx;
+    assign uo_out[7:1] = blinkenlights;
+
+    // Bidirectional IO mapping (Tiny Tapeout QSPI Pmod)
+    // uio[0]: Flash Chip Select (/CS0, Active Low)
+    assign uio_out[0] = spi_cs0_n;
+    assign uio_oe[0]  = 1'b1;
+
+    // uio[1]: Flash/PSRAM MOSI (SIO0)
+    assign uio_out[1] = spi_mosi;
+    assign uio_oe[1]  = 1'b1;
+
+    // uio[2]: Flash/PSRAM MISO (SIO1, Input)
+    assign spi_miso   = uio_in[2];
+    assign uio_out[2] = 1'b0;
+    assign uio_oe[2]  = 1'b0;
+
+    // uio[3]: SPI SCK (Serial Clock)
+    assign uio_out[3] = spi_sck;
+    assign uio_oe[3]  = 1'b1;
+
+    // uio[4]: SIO2 / WP# (Driven HIGH to disable write-protect in 1-bit SPI mode)
+    assign uio_out[4] = 1'b1;
+    assign uio_oe[4]  = 1'b1;
+
+    // uio[5]: SIO3 / HOLD# (Driven HIGH to disable hold in 1-bit SPI mode)
+    assign uio_out[5] = 1'b1;
+    assign uio_oe[5]  = 1'b1;
+
+    // uio[6]: PSRAM Chip Select (/CS1, Active Low)
+    assign uio_out[6] = spi_cs1_n;
+    assign uio_oe[6]  = 1'b1;
+
+    // uio[7]: Unused Pmod Pin (Driven HIGH / Inactive)
+    assign uio_out[7] = 1'b1;
+    assign uio_oe[7]  = 1'b1;
+
+    // Instantiate CPU Core
+    nova_core cpu_core (
+        .clk(clk),
+        .rst_n(rst_n),
+        .uart_rx(ui_in[0]),
+        .uart_tx(uart_tx),
+        .blinkenlights(blinkenlights),
+        .spi_miso(spi_miso),
+        .spi_mosi(spi_mosi),
+        .spi_sck(spi_sck),
+        .spi_cs0_n(spi_cs0_n),
+        .spi_cs1_n(spi_cs1_n)
+    );
+
+    // Sink unused input nets
+    wire _unused = &{ena, ui_in[7:1], uio_in[7:3], uio_in[1:0]};
 
 endmodule

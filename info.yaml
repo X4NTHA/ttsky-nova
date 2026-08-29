@@ -1,29 +1,32 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
-  discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
+  title:        "Data General Nova 1200 CPU"      # Project title
+  author:       "X4NTHA"      # Your name
+  discord:      "x4ntha"      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
+  description:  "16-bit Data General Nova 1200 CPU (4-bit nibble-serial datapath)"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  clock_hz:     10000000    # Clock frequency in Hz (10 MHz for 115200 Baud UART)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_x4ntha_nova"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "nova_alu.v"
+    - "nova_core.v"
+    - "nova_meow.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: ""
+  ui[0]: "UART_RX"
   ui[1]: ""
   ui[2]: ""
   ui[3]: ""
@@ -33,23 +36,23 @@ pinout:
   ui[7]: ""
 
   # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  uo[0]: "UART_TX"
+  uo[1]: "STATE_0"
+  uo[2]: "STATE_1"
+  uo[3]: "STATE_2"
+  uo[4]: "IR_OP_0"
+  uo[5]: "IR_OP_1"
+  uo[6]: "IR_OP_2"
+  uo[7]: "HALTED"
 
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
+  # Bidirectional pins (Tiny Tapeout QSPI Pmod)
+  uio[0]: "FLASH_CS_N"
+  uio[1]: "SPI_MOSI"
+  uio[2]: "SPI_MISO"
+  uio[3]: "SPI_SCK"
+  uio[4]: "SPI_WP_N"
+  uio[5]: "SPI_HOLD_N"
+  uio[6]: "PSRAM_CS_N"
   uio[7]: ""
 
 # Do not change!
