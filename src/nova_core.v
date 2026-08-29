@@ -111,24 +111,19 @@ module nova_core (
     reg [1:0] rx_sync;
     wire      rx_pin = rx_sync[1];
 
-    localparam RX_IDLE  = 2'd0;
-    localparam RX_START = 2'd1;
-    localparam RX_DATA  = 2'd2;
-    localparam RX_STOP  = 2'd3;
-
-    reg [1:0] rx_state;
+    reg       rx_active;
     reg [6:0] rx_baud_cnt;
-    reg [2:0] rx_bit_cnt;
+    reg [3:0] rx_bit_cnt;
     reg [7:0] rx_shift_reg;
     reg       rx_done_flag;
-    wire      rx_busy = (rx_state != RX_IDLE);
+    wire      rx_busy = rx_active;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rx_sync      <= 2'b11;
-            rx_state     <= RX_IDLE;
+            rx_active    <= 1'b0;
             rx_baud_cnt  <= 7'd0;
-            rx_bit_cnt   <= 3'd0;
+            rx_bit_cnt   <= 4'd0;
             rx_shift_reg <= 8'd0;
             rx_done_flag <= 1'b0;
         end else begin
@@ -140,55 +135,38 @@ module nova_core (
                 rx_done_flag <= 1'b0;
             end
 
-            case (rx_state)
-                // wait for falling edge of start bit
-                RX_IDLE: begin
+            if (!rx_active) begin
+                rx_baud_cnt <= 7'd0;
+                rx_bit_cnt  <= 4'd0;
+                if (rx_pin == 1'b0) begin
+                    rx_active <= 1'b1;
+                end
+            end else begin
+                // baud counter
+                if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
                     rx_baud_cnt <= 7'd0;
-                    rx_bit_cnt  <= 3'd0;
-                    if (rx_pin == 1'b0) begin
-                        rx_state <= RX_START;
-                    end
+                    rx_bit_cnt  <= rx_bit_cnt + 4'd1;
+                end else begin
+                    rx_baud_cnt <= rx_baud_cnt + 7'd1;
                 end
 
-                // validate start bit at center of baud window (reject sub-half-baud glitches)
-                RX_START: begin
-                    if (rx_baud_cnt == HALF_BAUD) begin
-                        if (rx_pin == 1'b0) begin
-                            rx_baud_cnt <= 7'd0;
-                            rx_state    <= RX_DATA;
-                        end else begin
-                            rx_state    <= RX_IDLE;
+                // mid-bit sampling
+                if (rx_baud_cnt == HALF_BAUD) begin
+                    if (rx_bit_cnt == 4'd0) begin
+                        // validate start bit (reject sub-half-baud glitches)
+                        if (rx_pin == 1'b1) begin
+                            rx_active <= 1'b0;
                         end
-                    end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
-                    end
-                end
-
-                // sample 8 data bits at center of each bit period (LSB first)
-                RX_DATA: begin
-                    if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
-                        rx_baud_cnt  <= 7'd0;
+                    end else if (rx_bit_cnt >= 4'd1 && rx_bit_cnt <= 4'd8) begin
+                        // sample 8 data bits LSB first
                         rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
-                        if (rx_bit_cnt == 3'd7) begin
-                            rx_state <= RX_STOP;
-                        end else begin
-                            rx_bit_cnt <= rx_bit_cnt + 3'd1;
-                        end
-                    end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
-                    end
-                end
-
-                // stop bit verification & latching
-                RX_STOP: begin
-                    if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
+                    end else if (rx_bit_cnt == 4'd9) begin
+                        // stop bit verification & latching
                         rx_done_flag <= 1'b1;
-                        rx_state     <= RX_IDLE;
-                    end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
+                        rx_active    <= 1'b0;
                     end
                 end
-            endcase
+            end
         end
     end
 
@@ -250,32 +228,22 @@ module nova_core (
     end
 
     // core control FSM: major cycles and instruction execution
-    localparam STATE_FETCH         = 4'd0;
-    localparam STATE_FETCH_ACK     = 4'd1;
-    localparam STATE_FETCH_DONE    = 4'd2;
-    localparam STATE_DECODE        = 4'd3;
-    localparam STATE_EXEC_ALU      = 4'd4;
-    localparam STATE_INDIR_REQ     = 4'd5;
-    localparam STATE_INDIR_ACK     = 4'd6;
-    localparam STATE_INDIR_DONE    = 4'd7;
-    localparam STATE_MEM_RD_REQ    = 4'd8;
-    localparam STATE_MEM_RD_ACK    = 4'd9;
-    localparam STATE_MEM_RD_DONE   = 4'd10;
-    localparam STATE_MEM_WR_REQ    = 4'd11;
-    localparam STATE_MEM_WR_ACK    = 4'd12;
-    localparam STATE_MEM_WR_DONE   = 4'd13;
-    localparam STATE_HALT          = 4'd14;
+    localparam STATE_FETCH         = 3'd0;
+    localparam STATE_FETCH_WAIT    = 3'd1;
+    localparam STATE_DECODE        = 3'd2;
+    localparam STATE_EXEC_ALU      = 3'd3;
+    localparam STATE_INDIR_WAIT    = 3'd4;
+    localparam STATE_MEM_RD_WAIT   = 3'd5;
+    localparam STATE_MEM_WR_WAIT   = 3'd6;
+    localparam STATE_HALT          = 3'd7;
 
     // effective address calculation for memory reference class (MRC)
     // index: 00 = Page 0 (0..255), 01 = PC-relative (+/-128), 10 = AC2-indexed, 11 = AC3-indexed
-    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 :
-                            (ir[7:6] == 2'b01) ? pc :
-                            (ir[7:6] == 2'b10) ? ac2[14:0] : ac3[14:0];
+    wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
+                           (ir[7:6] == 2'b10) ? ac2[14:0] : ac3[14:0];
 
-    wire [14:0] disp_ext = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} :
-                                                {{7{ir[15]}}, ir[15:8]};
-
-    wire [14:0] calculated_ea = base_addr + disp_ext;
+    wire [14:0] calculated_ea = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} :
+                                                     (rel_base + {{7{ir[15]}}, ir[15:8]});
 
     // ALC shifter logic (applied on cycle 3 once full 16-bit word is reassembled)
     wire [15:0] raw_res_word = {alu_result, ac_dst_val[15:4]};
@@ -370,20 +338,12 @@ module nova_core (
             case (state)
                 // instruction fetch: request 16-bit instruction word from SPI
                 STATE_FETCH: begin
-                    if (!meow_busy) begin
-                        mem_read_req <= 1'b1;
-                        state        <= STATE_FETCH_ACK;
-                    end
+                    mem_read_req <= 1'b1;
+                    state        <= STATE_FETCH_WAIT;
                 end
 
-                STATE_FETCH_ACK: begin
-                    if (meow_busy) begin
-                        mem_read_req <= 1'b0;
-                        state        <= STATE_FETCH_DONE;
-                    end
-                end
-
-                STATE_FETCH_DONE: begin
+                STATE_FETCH_WAIT: begin
+                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         ir    <= mem_data_in;
                         state <= STATE_DECODE;
@@ -457,13 +417,16 @@ module nova_core (
                         ea <= calculated_ea;
                         if (ir[5] == 1'b1) begin
                             // indirect deferral: fetch pointer word from memory
-                            state <= STATE_INDIR_REQ;
+                            mem_read_req <= 1'b1;
+                            state        <= STATE_INDIR_WAIT;
                         end else if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
                             // LDA (01), ISZ (00,10), DSZ (00,11)
-                            state <= STATE_MEM_RD_REQ;
+                            mem_read_req <= 1'b1;
+                            state        <= STATE_MEM_RD_WAIT;
                         end else if (ir[2:1] == 2'b10) begin
                             // STA (10)
-                            state <= STATE_MEM_WR_REQ;
+                            mem_write_req <= 1'b1;
+                            state         <= STATE_MEM_WR_WAIT;
                         end else begin
                             // JMP (00,00) / JSR (00,01)
                             pc    <= calculated_ea;
@@ -493,30 +456,19 @@ module nova_core (
                 end
 
                 // indirect addressing deferral: dereference pointer from memory
-                STATE_INDIR_REQ: begin
-                    if (!meow_busy) begin
-                        mem_read_req <= 1'b1;
-                        state        <= STATE_INDIR_ACK;
-                    end
-                end
-
-                STATE_INDIR_ACK: begin
-                    if (meow_busy) begin
-                        mem_read_req <= 1'b0;
-                        state        <= STATE_INDIR_DONE;
-                    end
-                end
-
-                STATE_INDIR_DONE: begin
+                STATE_INDIR_WAIT: begin
+                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         ea <= mem_data_in[14:0];
                         // route deferred target operation with resolved address
                         if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
                             // LDA (01), ISZ (00,10), DSZ (00,11)
-                            state <= STATE_MEM_RD_REQ;
+                            mem_read_req <= 1'b1;
+                            state        <= STATE_MEM_RD_WAIT;
                         end else if (ir[2:1] == 2'b10) begin
                             // STA (10)
-                            state <= STATE_MEM_WR_REQ;
+                            mem_write_req <= 1'b1;
+                            state         <= STATE_MEM_WR_WAIT;
                         end else begin
                             // JMP (00,00) / JSR (00,01)
                             pc    <= mem_data_in[14:0];
@@ -527,21 +479,8 @@ module nova_core (
                 end
 
                 // memory read (LDA / ISZ / DSZ)
-                STATE_MEM_RD_REQ: begin
-                    if (!meow_busy) begin
-                        mem_read_req <= 1'b1;
-                        state        <= STATE_MEM_RD_ACK;
-                    end
-                end
-
-                STATE_MEM_RD_ACK: begin
-                    if (meow_busy) begin
-                        mem_read_req <= 1'b0;
-                        state        <= STATE_MEM_RD_DONE;
-                    end
-                end
-
-                STATE_MEM_RD_DONE: begin
+                STATE_MEM_RD_WAIT: begin
+                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         if (ir[2:1] == 2'b01) begin
                             // LDA: load memory word into destination accumulator
@@ -555,27 +494,15 @@ module nova_core (
                             state <= STATE_FETCH;
                         end else if (ir[4:3] == 2'b10 || ir[4:3] == 2'b11) begin
                             // ISZ / DSZ: write modified word back to memory
-                            state <= STATE_MEM_WR_REQ;
+                            mem_write_req <= 1'b1;
+                            state         <= STATE_MEM_WR_WAIT;
                         end
                     end
                 end
 
                 // memory write (STA / ISZ / DSZ)
-                STATE_MEM_WR_REQ: begin
-                    if (!meow_busy) begin
-                        mem_write_req <= 1'b1;
-                        state         <= STATE_MEM_WR_ACK;
-                    end
-                end
-
-                STATE_MEM_WR_ACK: begin
-                    if (meow_busy) begin
-                        mem_write_req <= 1'b0;
-                        state         <= STATE_MEM_WR_DONE;
-                    end
-                end
-
-                STATE_MEM_WR_DONE: begin
+                STATE_MEM_WR_WAIT: begin
+                    mem_write_req <= 1'b0;
                     if (!meow_busy) begin
                         if (ir[2:1] == 2'b10) begin
                             // STA: write completed

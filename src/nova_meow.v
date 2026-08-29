@@ -15,7 +15,7 @@ module nova_meow (
     output wire [15:0] data_out,
     input  wire        read_req,
     input  wire        write_req,
-    output reg         busy,
+    output wire        busy,
 
     input  wire        spi_miso,
     output reg         spi_mosi,
@@ -36,6 +36,7 @@ module nova_meow (
     reg        is_write;
 
     assign data_out = rx_shift;
+    assign busy = (state != S_IDLE) || read_req || write_req;
 
     // standard SPI NOR flash / PSRAM commands: 0x03 (read), 0x02 (page write)
     wire [7:0]  spi_cmd  = is_write ? 8'h02 : 8'h03;
@@ -62,7 +63,6 @@ module nova_meow (
             spi_cs1_n <= 1'b1;
             spi_sck   <= 1'b0;
             spi_mosi  <= 1'b0;
-            busy      <= 1'b0;
             state     <= S_IDLE;
             rx_shift  <= 16'd0;
             bit_cnt   <= 6'd0;
@@ -72,7 +72,6 @@ module nova_meow (
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
-                        busy     <= 1'b1;
                         is_write <= write_req;
 
                         // partition: 0x0000..0x3FFF -> Flash (CS0#), 0x4000..0x7FFF -> PSRAM (CS1#)
@@ -89,7 +88,6 @@ module nova_meow (
                     end else begin
                         spi_cs0_n <= 1'b1;
                         spi_cs1_n <= 1'b1;
-                        busy      <= 1'b0;
                     end
                 end
 
@@ -120,7 +118,6 @@ module nova_meow (
                     spi_cs0_n <= 1'b1;
                     spi_cs1_n <= 1'b1;
                     spi_sck   <= 1'b0;
-                    busy      <= 1'b0;
                     state     <= S_IDLE;
                 end
             endcase
