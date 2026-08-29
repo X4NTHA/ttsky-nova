@@ -32,11 +32,8 @@ module nova_alu (
             3'b011: begin // INC
                 {carry_out, result} = {1'b0, a_nib} + (is_first_cycle ? 5'd1 : 5'd0) + {4'b0, carry_in};
             end
-            3'b100: begin // ADC
+            3'b100, 3'b101: begin // ADC / SUB: ~A + B + Carry_in
                 {carry_out, result} = {1'b0, ~a_nib} + {1'b0, b_nib} + {4'b0, carry_in};
-            end
-            3'b101: begin // SUB
-                {carry_out, result} = {1'b0, b_nib} + {1'b0, ~a_nib} + {4'b0, carry_in};
             end
             3'b110: begin // ADD
                 {carry_out, result} = {1'b0, a_nib} + {1'b0, b_nib} + {4'b0, carry_in};

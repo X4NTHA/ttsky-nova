@@ -48,7 +48,8 @@ module nova_core (
     // memory interface (nova_meow)
     wire [14:0] mem_addr = (state == 4'd0 || state == 4'd1 || state == 4'd2) ? pc : ea;
     wire [15:0] mem_data_in;
-    reg  [15:0] mem_data_out;
+    wire [15:0] isz_dsz_val = (ir[4:3] == 2'b10) ? (mem_data_in + 16'd1) : (mem_data_in - 16'd1);
+    wire [15:0] mem_data_out = (ir[2:1] == 2'b10) ? ac_dst_val : isz_dsz_val;
     reg         mem_read_req;
     reg         mem_write_req;
     wire        meow_busy;
@@ -119,7 +120,6 @@ module nova_core (
     reg [6:0] rx_baud_cnt;
     reg [2:0] rx_bit_cnt;
     reg [7:0] rx_shift_reg;
-    reg [7:0] rx_buf;
     reg       rx_done_flag;
     wire      rx_busy = (rx_state != RX_IDLE);
 
@@ -130,7 +130,6 @@ module nova_core (
             rx_baud_cnt  <= 7'd0;
             rx_bit_cnt   <= 3'd0;
             rx_shift_reg <= 8'd0;
-            rx_buf       <= 8'd0;
             rx_done_flag <= 1'b0;
         end else begin
             // 2-stage input synchronizer to eliminate metastability
@@ -161,33 +160,32 @@ module nova_core (
                             rx_state    <= RX_IDLE;
                         end
                     end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 1'b1;
+                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
                     end
                 end
 
                 // sample 8 data bits at center of each bit period (LSB first)
                 RX_DATA: begin
-                    if (rx_baud_cnt == BAUD_DIV - 1'b1) begin
+                    if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
                         rx_baud_cnt  <= 7'd0;
                         rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
                         if (rx_bit_cnt == 3'd7) begin
                             rx_state <= RX_STOP;
                         end else begin
-                            rx_bit_cnt <= rx_bit_cnt + 1'b1;
+                            rx_bit_cnt <= rx_bit_cnt + 3'd1;
                         end
                     end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 1'b1;
+                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
                     end
                 end
 
                 // stop bit verification & latching
                 RX_STOP: begin
-                    if (rx_baud_cnt == BAUD_DIV - 1'b1) begin
-                        rx_buf       <= rx_shift_reg;
+                    if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
                         rx_done_flag <= 1'b1;
                         rx_state     <= RX_IDLE;
                     end else begin
-                        rx_baud_cnt <= rx_baud_cnt + 1'b1;
+                        rx_baud_cnt <= rx_baud_cnt + 7'd1;
                     end
                 end
             endcase
@@ -238,7 +236,7 @@ module nova_core (
 
                 // shift out bits at 115200 baud intervals
                 TX_SEND: begin
-                    if (tx_baud_cnt == BAUD_DIV - 1'b1) begin
+                    if (tx_baud_cnt == BAUD_DIV - 7'd1) begin
                         tx_baud_cnt <= 7'd0;
                         if (tx_bit_cnt == 4'd1) begin
                             tx_out_bit   <= 1'b1;
@@ -247,10 +245,10 @@ module nova_core (
                         end else begin
                             tx_out_bit   <= tx_shift_reg[0];
                             tx_shift_reg <= {1'b1, tx_shift_reg[8:1]};
-                            tx_bit_cnt   <= tx_bit_cnt - 1'b1;
+                            tx_bit_cnt   <= tx_bit_cnt - 4'd1;
                         end
                     end else begin
-                        tx_baud_cnt <= tx_baud_cnt + 1'b1;
+                        tx_baud_cnt <= tx_baud_cnt + 7'd1;
                     end
                 end
             endcase
@@ -361,7 +359,6 @@ module nova_core (
             exec_cycle          <= 2'd0;
             mem_read_req        <= 1'b0;
             mem_write_req       <= 1'b0;
-            mem_data_out        <= 16'd0;
             tx_start_req        <= 1'b0;
             io_clear_rx_done    <= 1'b0;
             io_clear_tx_done    <= 1'b0;
@@ -413,32 +410,32 @@ module nova_core (
                         if (ir[15:10] == 6'o77) begin
                             // CPU control (Dev 0o77)
                             if (ir[7:5] == 3'b110) begin // HALT (DOC 0, CPU)
-                                pc    <= pc + 1'b1;
+                                pc    <= pc + 15'd1;
                                 state <= STATE_HALT;
                             end else if (ir[7:5] == 3'b101) begin // IORST (DICC 0, CPU)
                                 io_clear_rx_done <= 1'b1;
                                 io_clear_tx_done <= 1'b1;
-                                pc               <= pc + 1'b1;
+                                pc               <= pc + 15'd1;
                                 state            <= STATE_FETCH;
                             end else begin
-                                pc    <= pc + 1'b1;
+                                pc    <= pc + 15'd1;
                                 state <= STATE_FETCH;
                             end
                         end else begin
                             // standard I/O device (Keyboard 0o10 / Printer 0o11)
                             if (ir[7:5] == 3'b111) begin
                                 // SKP on device flag condition (SKPBN, SKPBZ, SKPDN, SKPDZ)
-                                pc    <= io_skip ? (pc + 2'd2) : (pc + 1'b1);
+                                pc    <= io_skip ? (pc + 15'd2) : (pc + 15'd1);
                                 state <= STATE_FETCH;
                             end else begin
                                 // data transfer (DIA: RX -> AC, DOA: AC -> TX)
                                 if (ir[7:5] == 3'b001 && ir[15:10] == 6'o10) begin
-                                    // DIA from keyboard: load RX buffer into AC[7:0], zero extend upper 8b
+                                    // DIA from keyboard: load RX shift buffer into AC[7:0], zero extend upper 8b
                                     case (ir[4:3])
-                                         2'b00: ac0 <= {8'h00, rx_buf};
-                                         2'b01: ac1 <= {8'h00, rx_buf};
-                                         2'b10: ac2 <= {8'h00, rx_buf};
-                                         2'b11: ac3 <= {8'h00, rx_buf};
+                                         2'b00: ac0 <= {8'h00, rx_shift_reg};
+                                         2'b01: ac1 <= {8'h00, rx_shift_reg};
+                                         2'b10: ac2 <= {8'h00, rx_shift_reg};
+                                         2'b11: ac3 <= {8'h00, rx_shift_reg};
                                     endcase
                                     io_clear_rx_done <= 1'b1;
                                 end else if (ir[7:5] == 3'b010 && ir[15:10] == 6'o11) begin
@@ -452,7 +449,7 @@ module nova_core (
                                     if (ir[15:10] == 6'o11) io_clear_tx_done <= 1'b1;
                                 end
 
-                                pc    <= pc + 1'b1;
+                                pc    <= pc + 15'd1;
                                 state <= STATE_FETCH;
                             end
                         end
@@ -462,30 +459,17 @@ module nova_core (
                         if (ir[5] == 1'b1) begin
                             // indirect deferral: fetch pointer word from memory
                             state <= STATE_INDIR_REQ;
+                        end else if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
+                            // LDA (01), ISZ (00,10), DSZ (00,11)
+                            state <= STATE_MEM_RD_REQ;
+                        end else if (ir[2:1] == 2'b10) begin
+                            // STA (10)
+                            state <= STATE_MEM_WR_REQ;
                         end else begin
-                            // direct memory reference
-                            if (ir[2:1] == 2'b01) begin // LDA (load accumulator)
-                                state <= STATE_MEM_RD_REQ;
-                            end else if (ir[2:1] == 2'b10) begin // STA (store accumulator)
-                                mem_data_out <= ac_dst_val;
-                                state        <= STATE_MEM_WR_REQ;
-                            end else begin
-                                // non-AC memory operations (JMP, JSR, ISZ, DSZ)
-                                case (ir[4:3])
-                                    2'b00: begin // JMP (jump to EA)
-                                        pc    <= calculated_ea;
-                                        state <= STATE_FETCH;
-                                    end
-                                    2'b01: begin // JSR (jump to subroutine: AC3 <= PC+1, PC <= EA)
-                                        ac3   <= {1'b0, pc + 1'b1};
-                                        pc    <= calculated_ea;
-                                        state <= STATE_FETCH;
-                                    end
-                                    2'b10, 2'b11: begin // ISZ, DSZ (read-modify-write)
-                                        state <= STATE_MEM_RD_REQ;
-                                    end
-                                endcase
-                            end
+                            // JMP (00,00) / JSR (00,01)
+                            pc    <= calculated_ea;
+                            if (ir[3] == 1'b1) ac3 <= {1'b0, pc + 15'd1};
+                            state <= STATE_FETCH;
                         end
                     end
                 end
@@ -497,7 +481,7 @@ module nova_core (
                     if (exec_cycle == 2'd3) begin
                         // final cycle: apply shifter, skip, and no-load writeback suppression
                         carry_flag <= shifted_cout;
-                        pc         <= alc_skip ? (pc + 2'd2) : (pc + 1'b1);
+                        pc         <= alc_skip ? (pc + 15'd2) : (pc + 15'd1);
                         state      <= STATE_FETCH;
 
                         ac0 <= (ir[4:3] == 2'b00 && !ir[12]) ? shifted_res : {ac0[3:0], ac0[15:4]};
@@ -511,7 +495,7 @@ module nova_core (
                         ac2 <= (ir[4:3] == 2'b10) ? {alu_result, ac2[15:4]} : {ac2[3:0], ac2[15:4]};
                         ac3 <= (ir[4:3] == 2'b11) ? {alu_result, ac3[15:4]} : {ac3[3:0], ac3[15:4]};
 
-                        exec_cycle <= exec_cycle + 1'b1;
+                        exec_cycle <= exec_cycle + 2'd1;
                     end
                 end
 
@@ -534,26 +518,17 @@ module nova_core (
                     if (!meow_busy) begin
                         ea <= mem_data_in[14:0];
                         // route deferred target operation with resolved address
-                        if (ir[2:1] == 2'b01) begin // LDA
+                        if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
+                            // LDA (01), ISZ (00,10), DSZ (00,11)
                             state <= STATE_MEM_RD_REQ;
-                        end else if (ir[2:1] == 2'b10) begin // STA
-                            mem_data_out <= ac_dst_val;
-                            state        <= STATE_MEM_WR_REQ;
+                        end else if (ir[2:1] == 2'b10) begin
+                            // STA (10)
+                            state <= STATE_MEM_WR_REQ;
                         end else begin
-                            case (ir[4:3])
-                                2'b00: begin // JMP
-                                    pc    <= mem_data_in[14:0];
-                                    state <= STATE_FETCH;
-                                end
-                                2'b01: begin // JSR
-                                    ac3   <= {1'b0, pc + 1'b1};
-                                    pc    <= mem_data_in[14:0];
-                                    state <= STATE_FETCH;
-                                end
-                                2'b10, 2'b11: begin // ISZ, DSZ
-                                    state <= STATE_MEM_RD_REQ;
-                                end
-                            endcase
+                            // JMP (00,00) / JSR (00,01)
+                            pc    <= mem_data_in[14:0];
+                            if (ir[3] == 1'b1) ac3 <= {1'b0, pc + 15'd1};
+                            state <= STATE_FETCH;
                         end
                     end
                 end
@@ -583,16 +558,11 @@ module nova_core (
                                 2'b10: ac2 <= mem_data_in;
                                 2'b11: ac3 <= mem_data_in;
                             endcase
-                            pc    <= pc + 1'b1;
+                            pc    <= pc + 15'd1;
                             state <= STATE_FETCH;
-                        end else if (ir[4:3] == 2'b10) begin
-                            // ISZ: increment memory word and write back
-                            mem_data_out <= mem_data_in + 16'd1;
-                            state        <= STATE_MEM_WR_REQ;
-                        end else if (ir[4:3] == 2'b11) begin
-                            // DSZ: decrement memory word and write back
-                            mem_data_out <= mem_data_in - 16'd1;
-                            state        <= STATE_MEM_WR_REQ;
+                        end else if (ir[4:3] == 2'b10 || ir[4:3] == 2'b11) begin
+                            // ISZ / DSZ: write modified word back to memory
+                            state <= STATE_MEM_WR_REQ;
                         end
                     end
                 end
@@ -616,11 +586,11 @@ module nova_core (
                     if (!meow_busy) begin
                         if (ir[2:1] == 2'b10) begin
                             // STA: write completed
-                            pc    <= pc + 1'b1;
+                            pc    <= pc + 15'd1;
                             state <= STATE_FETCH;
                         end else if (ir[4:3] == 2'b10 || ir[4:3] == 2'b11) begin
                             // ISZ / DSZ: skip next word if modified result is zero
-                            pc    <= (mem_data_out == 16'h0000) ? (pc + 2'd2) : (pc + 1'b1);
+                            pc    <= (isz_dsz_val == 16'h0000) ? (pc + 15'd2) : (pc + 15'd1);
                             state <= STATE_FETCH;
                         end
                     end

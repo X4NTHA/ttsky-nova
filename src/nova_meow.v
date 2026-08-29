@@ -44,11 +44,13 @@ module nova_meow (
 
     // dynamic MOSI bit selection from transaction field based on bit_cnt
     reg next_mosi;
+    wire [2:0] cmd_idx = bit_cnt[2:0];
+    wire [4:0] adr_idx = bit_cnt[4:0] - 5'd16;
     always @(*) begin
         if (bit_cnt >= 6'd40) begin
-            next_mosi = spi_cmd[bit_cnt - 6'd40];
+            next_mosi = spi_cmd[cmd_idx];
         end else if (bit_cnt >= 6'd16) begin
-            next_mosi = byte_adr[bit_cnt - 6'd16];
+            next_mosi = byte_adr[adr_idx];
         end else begin
             next_mosi = data_in[bit_cnt[3:0]];
         end
@@ -100,13 +102,15 @@ module nova_meow (
 
                 // SCK high phase: sample MISO bit on rising edge
                 S_CLK_HIGH: begin
-                    spi_sck  <= 1'b1;
-                    rx_shift <= {rx_shift[14:0], spi_miso};
+                    spi_sck <= 1'b1;
+                    if (!is_write) begin
+                        rx_shift <= {rx_shift[14:0], spi_miso};
+                    end
 
                     if (bit_cnt == 6'd0) begin
                         state <= S_DONE;
                     end else begin
-                        bit_cnt <= bit_cnt - 1'b1;
+                        bit_cnt <= bit_cnt - 6'd1;
                         state   <= S_CLK_LOW;
                     end
                 end
