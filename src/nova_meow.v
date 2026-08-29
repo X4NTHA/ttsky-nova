@@ -32,15 +32,27 @@ module nova_meow (
 
     reg [1:0]  state;
     reg [5:0]  bit_cnt;
-    reg [47:0] tx_shift;
     reg [15:0] rx_shift;
+    reg        is_write;
 
     assign data_out = rx_shift;
 
     // standard SPI NOR flash / PSRAM commands: 0x03 (read), 0x02 (page write)
-    wire [7:0]  spi_cmd  = write_req ? 8'h02 : 8'h03;
+    wire [7:0]  spi_cmd  = is_write ? 8'h02 : 8'h03;
     // convert 15-bit Nova word address to 24-bit byte address (word * 2)
     wire [23:0] byte_adr = {8'h00, addr, 1'b0};
+
+    // dynamic MOSI bit selection from transaction field based on bit_cnt
+    reg next_mosi;
+    always @(*) begin
+        if (bit_cnt >= 6'd40) begin
+            next_mosi = spi_cmd[bit_cnt - 6'd40];
+        end else if (bit_cnt >= 6'd16) begin
+            next_mosi = byte_adr[bit_cnt - 6'd16];
+        end else begin
+            next_mosi = data_in[bit_cnt[3:0]];
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -50,15 +62,16 @@ module nova_meow (
             spi_mosi  <= 1'b0;
             busy      <= 1'b0;
             state     <= S_IDLE;
-            tx_shift  <= 48'd0;
             rx_shift  <= 16'd0;
             bit_cnt   <= 6'd0;
+            is_write  <= 1'b0;
         end else begin
             case (state)
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
-                        busy <= 1'b1;
+                        busy     <= 1'b1;
+                        is_write <= write_req;
 
                         // partition: 0x0000..0x3FFF -> Flash (CS0#), 0x4000..0x7FFF -> PSRAM (CS1#)
                         if (!addr[14]) begin
@@ -69,10 +82,8 @@ module nova_meow (
                             spi_cs1_n <= 1'b0;
                         end
 
-                        // 48-bit frame: 8b command + 24b byte address + 16b data word
-                        tx_shift <= {spi_cmd, byte_adr, data_in};
-                        bit_cnt  <= 6'd47;
-                        state    <= S_CLK_LOW;
+                        bit_cnt <= 6'd47;
+                        state   <= S_CLK_LOW;
                     end else begin
                         spi_cs0_n <= 1'b1;
                         spi_cs1_n <= 1'b1;
@@ -83,15 +94,14 @@ module nova_meow (
                 // SCK low phase: drive next MOSI bit on falling edge
                 S_CLK_LOW: begin
                     spi_sck  <= 1'b0;
-                    spi_mosi <= tx_shift[47];
+                    spi_mosi <= next_mosi;
                     state    <= S_CLK_HIGH;
                 end
 
-                // SCK high phase: sample MISO bit on rising edge and shift frame
+                // SCK high phase: sample MISO bit on rising edge
                 S_CLK_HIGH: begin
                     spi_sck  <= 1'b1;
                     rx_shift <= {rx_shift[14:0], spi_miso};
-                    tx_shift <= {tx_shift[46:0], 1'b0};
 
                     if (bit_cnt == 6'd0) begin
                         state <= S_DONE;

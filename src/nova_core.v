@@ -33,18 +33,22 @@ module nova_core (
     reg        carry_intermediate;
     reg [14:0] ea;
 
+    // helper mux for selected destination accumulator
+    wire [15:0] ac_dst_val = (ir[4:3] == 2'b00) ? ac0 :
+                             (ir[4:3] == 2'b01) ? ac1 :
+                             (ir[4:3] == 2'b10) ? ac2 : ac3;
+
     // peripheral control signals
     reg        tx_start_req;
-    reg [7:0]  tx_data_byte;
     reg        io_clear_rx_done;
     reg        io_clear_tx_done;
     reg [3:0]  state;
     reg [1:0]  exec_cycle;
 
     // memory interface (nova_meow)
-    reg  [14:0] mem_addr;
-    reg  [15:0] mem_data_out;
+    wire [14:0] mem_addr = (state == 4'd0 || state == 4'd1 || state == 4'd2) ? pc : ea;
     wire [15:0] mem_data_in;
+    reg  [15:0] mem_data_out;
     reg         mem_read_req;
     reg         mem_write_req;
     wire        meow_busy;
@@ -197,7 +201,7 @@ module nova_core (
     reg       tx_state;
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
-    reg [9:0] tx_shift_reg;
+    reg [8:0] tx_shift_reg;
     reg       tx_done_flag;
     reg       tx_out_bit;
 
@@ -209,7 +213,7 @@ module nova_core (
             tx_state     <= TX_IDLE;
             tx_baud_cnt  <= 7'd0;
             tx_bit_cnt   <= 4'd0;
-            tx_shift_reg <= 10'h3FF;
+            tx_shift_reg <= 9'h1FF;
             tx_done_flag <= 1'b0;
             tx_out_bit   <= 1'b1;
         end else begin
@@ -222,8 +226,8 @@ module nova_core (
                 TX_IDLE: begin
                     tx_out_bit <= 1'b1;
                     if (tx_start_req) begin
-                        // frame: stop(1) + data(8) + start(0)
-                        tx_shift_reg <= {1'b1, tx_data_byte, 1'b0};
+                        // frame: stop(1) + data(8)
+                        tx_shift_reg <= {1'b1, ac_dst_val[7:0]};
                         tx_baud_cnt  <= 7'd0;
                         tx_bit_cnt   <= 4'd10;
                         tx_done_flag <= 1'b0;
@@ -241,8 +245,8 @@ module nova_core (
                             tx_done_flag <= 1'b1;
                             tx_state     <= TX_IDLE;
                         end else begin
-                            tx_out_bit   <= tx_shift_reg[1];
-                            tx_shift_reg <= {1'b1, tx_shift_reg[9:1]};
+                            tx_out_bit   <= tx_shift_reg[0];
+                            tx_shift_reg <= {1'b1, tx_shift_reg[8:1]};
                             tx_bit_cnt   <= tx_bit_cnt - 1'b1;
                         end
                     end else begin
@@ -269,15 +273,6 @@ module nova_core (
     localparam STATE_MEM_WR_ACK    = 4'd12;
     localparam STATE_MEM_WR_DONE   = 4'd13;
     localparam STATE_HALT          = 4'd14;
-
-    // helper muxes for selected source and destination accumulators
-    wire [15:0] ac_src_val = (ir[2:1] == 2'b00) ? ac0 :
-                             (ir[2:1] == 2'b01) ? ac1 :
-                             (ir[2:1] == 2'b10) ? ac2 : ac3;
-
-    wire [15:0] ac_dst_val = (ir[4:3] == 2'b00) ? ac0 :
-                             (ir[4:3] == 2'b01) ? ac1 :
-                             (ir[4:3] == 2'b10) ? ac2 : ac3;
 
     // effective address calculation for memory reference class (MRC)
     // index: 00 = Page 0 (0..255), 01 = PC-relative (+/-128), 10 = AC2-indexed, 11 = AC3-indexed
@@ -364,12 +359,10 @@ module nova_core (
             carry_intermediate <= 1'b0;
             ea                  <= 15'd0;
             exec_cycle          <= 2'd0;
-            mem_addr            <= 15'd0;
-            mem_data_out        <= 16'd0;
             mem_read_req        <= 1'b0;
             mem_write_req       <= 1'b0;
+            mem_data_out        <= 16'd0;
             tx_start_req        <= 1'b0;
-            tx_data_byte        <= 8'd0;
             io_clear_rx_done    <= 1'b0;
             io_clear_tx_done    <= 1'b0;
         end else begin
@@ -382,7 +375,6 @@ module nova_core (
                 // instruction fetch: request 16-bit instruction word from SPI
                 STATE_FETCH: begin
                     if (!meow_busy) begin
-                        mem_addr     <= pc;
                         mem_read_req <= 1'b1;
                         state        <= STATE_FETCH_ACK;
                     end
@@ -443,15 +435,14 @@ module nova_core (
                                 if (ir[7:5] == 3'b001 && ir[15:10] == 6'o10) begin
                                     // DIA from keyboard: load RX buffer into AC[7:0], zero extend upper 8b
                                     case (ir[4:3])
-                                        2'b00: ac0 <= {8'h00, rx_buf};
-                                        2'b01: ac1 <= {8'h00, rx_buf};
-                                        2'b10: ac2 <= {8'h00, rx_buf};
-                                        2'b11: ac3 <= {8'h00, rx_buf};
+                                         2'b00: ac0 <= {8'h00, rx_buf};
+                                         2'b01: ac1 <= {8'h00, rx_buf};
+                                         2'b10: ac2 <= {8'h00, rx_buf};
+                                         2'b11: ac3 <= {8'h00, rx_buf};
                                     endcase
                                     io_clear_rx_done <= 1'b1;
                                 end else if (ir[7:5] == 3'b010 && ir[15:10] == 6'o11) begin
                                     // DOA to printer: send AC[7:0] to UART TX transmitter
-                                    tx_data_byte <= ac_dst_val[7:0];
                                     tx_start_req <= 1'b1;
                                 end
 
@@ -527,7 +518,6 @@ module nova_core (
                 // indirect addressing deferral: dereference pointer from memory
                 STATE_INDIR_REQ: begin
                     if (!meow_busy) begin
-                        mem_addr     <= ea;
                         mem_read_req <= 1'b1;
                         state        <= STATE_INDIR_ACK;
                     end
@@ -571,7 +561,6 @@ module nova_core (
                 // memory read (LDA / ISZ / DSZ)
                 STATE_MEM_RD_REQ: begin
                     if (!meow_busy) begin
-                        mem_addr     <= ea;
                         mem_read_req <= 1'b1;
                         state        <= STATE_MEM_RD_ACK;
                     end
@@ -598,11 +587,11 @@ module nova_core (
                             state <= STATE_FETCH;
                         end else if (ir[4:3] == 2'b10) begin
                             // ISZ: increment memory word and write back
-                            mem_data_out <= mem_data_in + 1'b1;
+                            mem_data_out <= mem_data_in + 16'd1;
                             state        <= STATE_MEM_WR_REQ;
                         end else if (ir[4:3] == 2'b11) begin
                             // DSZ: decrement memory word and write back
-                            mem_data_out <= mem_data_in - 1'b1;
+                            mem_data_out <= mem_data_in - 16'd1;
                             state        <= STATE_MEM_WR_REQ;
                         end
                     end
@@ -611,7 +600,6 @@ module nova_core (
                 // memory write (STA / ISZ / DSZ)
                 STATE_MEM_WR_REQ: begin
                     if (!meow_busy) begin
-                        mem_addr      <= ea;
                         mem_write_req <= 1'b1;
                         state         <= STATE_MEM_WR_ACK;
                     end

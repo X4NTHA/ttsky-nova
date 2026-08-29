@@ -23,23 +23,23 @@ module nova_alu (
                 carry_out = carry_in;
             end
             3'b001: begin // NEG
-                {carry_out, result} = {1'b0, ~a_nib} + 5'd0 + carry_in;
+                {carry_out, result} = {1'b0, ~a_nib} + {4'b0, carry_in};
             end
             3'b010: begin // MOV
                 result = a_nib;
                 carry_out = carry_in;
             end
             3'b011: begin // INC
-                {carry_out, result} = {1'b0, a_nib} + (is_first_cycle ? 5'd1 : 5'd0) + carry_in;
+                {carry_out, result} = {1'b0, a_nib} + (is_first_cycle ? 5'd1 : 5'd0) + {4'b0, carry_in};
             end
             3'b100: begin // ADC
-                {carry_out, result} = {1'b0, ~a_nib} + {1'b0, b_nib} + carry_in;
+                {carry_out, result} = {1'b0, ~a_nib} + {1'b0, b_nib} + {4'b0, carry_in};
             end
             3'b101: begin // SUB
-                {carry_out, result} = {1'b0, b_nib} + {1'b0, ~a_nib} + carry_in;
+                {carry_out, result} = {1'b0, b_nib} + {1'b0, ~a_nib} + {4'b0, carry_in};
             end
             3'b110: begin // ADD
-                {carry_out, result} = {1'b0, a_nib} + {1'b0, b_nib} + carry_in;
+                {carry_out, result} = {1'b0, a_nib} + {1'b0, b_nib} + {4'b0, carry_in};
             end
             3'b111: begin // AND
                 result = a_nib & b_nib;
