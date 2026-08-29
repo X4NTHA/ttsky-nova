@@ -16,35 +16,33 @@ module nova_alu (
     output reg        carry_out
 );
 
+    // operand selection for single shared arithmetic adder
+    // ADD (110) & INC (011) use A; NEG (001), ADC (100), SUB (101) use ~A
+    wire [3:0] op_a = (opcode == 3'b011 || opcode == 3'b110) ? a_nib : ~a_nib;
+
+    // ADD (110), ADC (100), SUB (101) use B; INC (011) uses 1 on first cycle; NEG (001) uses 0
+    wire [3:0] op_b = (opcode == 3'b110 || opcode == 3'b100 || opcode == 3'b101) ? b_nib :
+                      (opcode == 3'b011 && is_first_cycle) ? 4'd1 : 4'd0;
+
+    wire [4:0] adder_sum = {1'b0, op_a} + {1'b0, op_b} + {4'b0, carry_in};
+
     always @(*) begin
         case (opcode)
             3'b000: begin // COM
-                result = ~a_nib;
+                result    = ~a_nib;
                 carry_out = carry_in;
-            end
-            3'b001: begin // NEG
-                {carry_out, result} = {1'b0, ~a_nib} + {4'b0, carry_in};
             end
             3'b010: begin // MOV
-                result = a_nib;
+                result    = a_nib;
                 carry_out = carry_in;
-            end
-            3'b011: begin // INC
-                {carry_out, result} = {1'b0, a_nib} + (is_first_cycle ? 5'd1 : 5'd0) + {4'b0, carry_in};
-            end
-            3'b100, 3'b101: begin // ADC / SUB: ~A + B + Carry_in
-                {carry_out, result} = {1'b0, ~a_nib} + {1'b0, b_nib} + {4'b0, carry_in};
-            end
-            3'b110: begin // ADD
-                {carry_out, result} = {1'b0, a_nib} + {1'b0, b_nib} + {4'b0, carry_in};
             end
             3'b111: begin // AND
-                result = a_nib & b_nib;
+                result    = a_nib & b_nib;
                 carry_out = carry_in;
             end
-            default: begin // default returns zero
-                result = 4'b0000;
-                carry_out = 1'b0;
+            default: begin // NEG, INC, ADC, SUB, ADD (shared adder)
+                result    = adder_sum[3:0];
+                carry_out = adder_sum[4];
             end
         endcase
     end

@@ -48,7 +48,7 @@ module nova_core (
     // memory interface (nova_meow)
     wire [14:0] mem_addr = (state == 4'd0 || state == 4'd1 || state == 4'd2) ? pc : ea;
     wire [15:0] mem_data_in;
-    wire [15:0] isz_dsz_val = (ir[4:3] == 2'b10) ? (mem_data_in + 16'd1) : (mem_data_in - 16'd1);
+    wire [15:0] isz_dsz_val = mem_data_in + (ir[4:3] == 2'b10 ? 16'd1 : 16'hFFFF);
     wire [15:0] mem_data_out = (ir[2:1] == 2'b10) ? ac_dst_val : isz_dsz_val;
     reg         mem_read_req;
     reg         mem_write_req;
@@ -199,21 +199,19 @@ module nova_core (
     reg       tx_state;
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
-    reg [8:0] tx_shift_reg;
+    reg [9:0] tx_shift_reg;
     reg       tx_done_flag;
-    reg       tx_out_bit;
 
     wire tx_busy = (tx_state != TX_IDLE);
-    assign uart_tx = tx_out_bit;
+    assign uart_tx = (tx_state == TX_SEND) ? tx_shift_reg[0] : 1'b1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             tx_state     <= TX_IDLE;
             tx_baud_cnt  <= 7'd0;
             tx_bit_cnt   <= 4'd0;
-            tx_shift_reg <= 9'h1FF;
+            tx_shift_reg <= 10'h3FF;
             tx_done_flag <= 1'b0;
-            tx_out_bit   <= 1'b1;
         end else begin
             // clear tx_done_flag when CPU writes DOA or issues CLR pulse
             if (io_clear_tx_done) begin
@@ -222,14 +220,12 @@ module nova_core (
 
             case (tx_state)
                 TX_IDLE: begin
-                    tx_out_bit <= 1'b1;
                     if (tx_start_req) begin
-                        // frame: stop(1) + data(8)
-                        tx_shift_reg <= {1'b1, ac_dst_val[7:0]};
+                        // frame: stop(1) + data(8) + start(0)
+                        tx_shift_reg <= {1'b1, ac_dst_val[7:0], 1'b0};
                         tx_baud_cnt  <= 7'd0;
                         tx_bit_cnt   <= 4'd10;
                         tx_done_flag <= 1'b0;
-                        tx_out_bit   <= 1'b0; // assert start bit immediately
                         tx_state     <= TX_SEND;
                     end
                 end
@@ -239,12 +235,10 @@ module nova_core (
                     if (tx_baud_cnt == BAUD_DIV - 7'd1) begin
                         tx_baud_cnt <= 7'd0;
                         if (tx_bit_cnt == 4'd1) begin
-                            tx_out_bit   <= 1'b1;
                             tx_done_flag <= 1'b1;
                             tx_state     <= TX_IDLE;
                         end else begin
-                            tx_out_bit   <= tx_shift_reg[0];
-                            tx_shift_reg <= {1'b1, tx_shift_reg[8:1]};
+                            tx_shift_reg <= {1'b1, tx_shift_reg[9:1]};
                             tx_bit_cnt   <= tx_bit_cnt - 4'd1;
                         end
                     end else begin
@@ -310,6 +304,11 @@ module nova_core (
             end
         endcase
     end
+
+    // ALC destination accumulator writeback value
+    wire [15:0] next_dest_ac = (exec_cycle == 2'd3) ?
+                               (ir[12] ? {ac_dst_val[3:0], ac_dst_val[15:4]} : shifted_res) :
+                               {alu_result, ac_dst_val[15:4]};
 
     // ALC skip condition evaluation (skip next instruction if condition is true)
     reg alc_skip;
@@ -483,20 +482,14 @@ module nova_core (
                         carry_flag <= shifted_cout;
                         pc         <= alc_skip ? (pc + 15'd2) : (pc + 15'd1);
                         state      <= STATE_FETCH;
-
-                        ac0 <= (ir[4:3] == 2'b00 && !ir[12]) ? shifted_res : {ac0[3:0], ac0[15:4]};
-                        ac1 <= (ir[4:3] == 2'b01 && !ir[12]) ? shifted_res : {ac1[3:0], ac1[15:4]};
-                        ac2 <= (ir[4:3] == 2'b10 && !ir[12]) ? shifted_res : {ac2[3:0], ac2[15:4]};
-                        ac3 <= (ir[4:3] == 2'b11 && !ir[12]) ? shifted_res : {ac3[3:0], ac3[15:4]};
                     end else begin
-                        // cycles 0..2: rotate 4-bit nibble into destination AC, rotate other ACs
-                        ac0 <= (ir[4:3] == 2'b00) ? {alu_result, ac0[15:4]} : {ac0[3:0], ac0[15:4]};
-                        ac1 <= (ir[4:3] == 2'b01) ? {alu_result, ac1[15:4]} : {ac1[3:0], ac1[15:4]};
-                        ac2 <= (ir[4:3] == 2'b10) ? {alu_result, ac2[15:4]} : {ac2[3:0], ac2[15:4]};
-                        ac3 <= (ir[4:3] == 2'b11) ? {alu_result, ac3[15:4]} : {ac3[3:0], ac3[15:4]};
-
                         exec_cycle <= exec_cycle + 2'd1;
                     end
+
+                    ac0 <= (ir[4:3] == 2'b00) ? next_dest_ac : {ac0[3:0], ac0[15:4]};
+                    ac1 <= (ir[4:3] == 2'b01) ? next_dest_ac : {ac1[3:0], ac1[15:4]};
+                    ac2 <= (ir[4:3] == 2'b10) ? next_dest_ac : {ac2[3:0], ac2[15:4]};
+                    ac3 <= (ir[4:3] == 2'b11) ? next_dest_ac : {ac3[3:0], ac3[15:4]};
                 end
 
                 // indirect addressing deferral: dereference pointer from memory
