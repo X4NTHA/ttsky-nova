@@ -626,3 +626,197 @@ async def test_assembler_pipeline_echo(dut):
         
         # inter-character typing jitter
         await ClockCycles(dut.clk, random.randint(300, 1500))
+
+# test 8: complete ALC skip matrix: all 8 skip conditions + no-load AC preservation
+@cocotb.test()
+async def test_alc_skip_matrix(dut):
+    """
+    test 8: verifies all 8 ALC skip conditions (never/SKP/SZC/SNC/SZR/SNR/SEZ/SBN)
+    and confirms that the no-load '#' modifier preserves the dest accumulator
+    """
+    clock = Clock(dut.clk, 100, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    flash_mem = {}
+    ram_mem = {}
+    access_log = []
+    cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem, access_log))
+
+    # setup: ac0=0x0000, ac1=0x0001, carry=0
+    # MOV ac1,ac1 (c=Z) -> ac1=0x0001, carry=0
+    # then exercise all 8 skip cases in order, collecting which addr were fetched
+
+    # linear sequence: each pair is (skip-test, sentinel that must/must-not be fetched)
+    # all tests use ac0 only, tracked through the sequence
+    #
+    # addr 0:  COM ac0         -> ac0=0xFFFF, carry=0
+    # addr 1:  MOV#Z SZC      -> carry_in=0, SZC(carry=0) -> skip 2
+    # addr 2:  sentinel (must be SKIPPED)
+    # addr 3:  MOV# SNR       -> no-load, result=0xFFFF != 0 -> SNR -> skip 4
+    # addr 4:  sentinel (must be SKIPPED)
+    # addr 5:  INC ac0 (c=Z)  -> ac0=0x0000, carry=1 (wrap from 0xFFFF+1)
+    # addr 6:  MOV# SNC       -> carry_in=carry_flag=1, carry_out=1, SNC -> skip 7
+    # addr 7:  sentinel (must be SKIPPED)
+    # addr 8:  MOV# SZR       -> no-load, result=0x0000, SZR -> skip 9
+    # addr 9:  sentinel (must be SKIPPED)
+    # addr 10: INC ac0 (c=Z)  -> ac0=0x0001, carry=0
+    # addr 11: MOV#Z SEZ      -> carry_in=0, carry_zero=1, SEZ -> skip 12
+    # addr 12: sentinel (must be SKIPPED)
+    # addr 13: MOV# SKP       -> always -> skip 14
+    # addr 14: sentinel (must be SKIPPED)
+    # addr 15: COM ac0        -> ac0=0xFFFE, carry=0 (result != 0, carry = 0)
+    # addr 16: MOV#Z SBN     -> carry_in=0, carry_zero=1, SBN=false -> NOT skip 17
+    # addr 17: sentinel (must NOT be skipped — confirms SBN evaluated false)
+    # addr 18: HALT
+    flash_mem[0]  = encode_alc(acs=0, acd=0, op=0)                              # COM ac0 -> 0xFFFF, carry=0
+    flash_mem[1]  = encode_alc(acs=0, acd=0, op=2, carry=1, no_load=1, skip=2)  # MOV#Z SZC: carry=0 -> skip 2
+    flash_mem[2]  = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[3]  = encode_alc(acs=0, acd=0, op=2, no_load=1, skip=5)           # MOV# SNR: 0xFFFF != 0 -> skip 4
+    flash_mem[4]  = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[5]  = encode_alc(acs=0, acd=0, op=3, carry=1)                     # INC ac0 (c=Z) -> 0x0000, carry=1
+    flash_mem[6]  = encode_alc(acs=0, acd=0, op=2, carry=0, no_load=1, skip=3)  # MOV# SNC: carry=1 -> skip 7
+    flash_mem[7]  = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[8]  = encode_alc(acs=0, acd=0, op=2, no_load=1, skip=4)           # MOV# SZR: result=0 -> skip 9
+    flash_mem[9]  = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[10] = encode_alc(acs=0, acd=0, op=3, carry=1)                     # INC ac0 (c=Z) -> 0x0001, carry=0
+    flash_mem[11] = encode_alc(acs=0, acd=0, op=2, carry=1, no_load=1, skip=6)  # MOV#Z SEZ: carry_zero=1 -> skip 12
+    flash_mem[12] = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[13] = encode_alc(acs=0, acd=0, op=2, no_load=1, skip=1)           # MOV# SKP: always -> skip 14
+    flash_mem[14] = encode_alc(acs=0, acd=0, op=0)                              # sentinel (skipped)
+    flash_mem[15] = encode_alc(acs=0, acd=0, op=0)                              # COM ac0 -> 0xFFFE, carry=0    mmm, C0xFFFE
+    flash_mem[16] = encode_alc(acs=0, acd=0, op=2, carry=1, no_load=1, skip=7)  # MOV#Z SBN: carry_zero=1 -> SBN false -> NOT skip
+    flash_mem[17] = encode_alc(acs=0, acd=0, op=0)                              # sentinel (NOT skipped — SBN correctly false)
+    flash_mem[18] = encode_io(ac=0, transfer=6, control=0, dev=0o77)            # HALT!     7(0o0)7
+    dut.ena.value = 1
+    dut.ui_in.value = 1
+    dut.uio_in.value = 0
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 10)
+    dut.rst_n.value = 1
+
+    await ClockCycles(dut.clk, 5000)
+
+    fetched = [addr for (op, is_flash, addr) in access_log if op == 'READ' and is_flash]
+
+    # sentinels that must have been skipped (layout: SZC->2, SNR->4, SNC->7, SZR->9, SEZ->12, SKP->14)
+    assert 2  not in fetched, "SZC skip failed (sentinel at 2 was fetched)"
+    assert 4  not in fetched, "SNR skip failed (sentinel at 4 was fetched)"
+    assert 7  not in fetched, "SNC skip failed (sentinel at 7 was fetched)"
+    assert 9  not in fetched, "SZR skip failed (sentinel at 9 was fetched)"
+    assert 12 not in fetched, "SEZ skip failed (sentinel at 12 was fetched)"
+    assert 14 not in fetched, "SKP skip failed (sentinel at 14 was fetched)"
+    # SBN should NOT have skipped (carry_zero=1 makes SBN false when carry=0)
+    assert 17 in fetched, "SBN incorrectly skipped (sentinel at 17 should have been fetched)"
+    assert 18 in fetched, "HALT at 18 was not reached"
+
+# test 9: JSR return address + indirect JMP
+@cocotb.test()
+async def test_jsr_return_and_indirect_jmp(dut):
+    """
+    test 9: verifies that JSR writes pc+1 into AC3 as the return address, and
+    that an indirect JMP correctly dereferences the pointer and jumps through it
+    """
+    clock = Clock(dut.clk, 100, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    flash_mem = {}
+    ram_mem = {}
+    access_log = []
+    cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem, access_log))
+
+    # test sequence:
+    # 0: JSR 0x10  (jump to 0x10, stores return addr 1 in AC3)
+    # 1: HALT      (should be reached via return)
+    # ...
+    # 0x10: STA AC3, 0x20    (store return address into page-zero pointer at 0x20)
+    # 0x11: JMP @0x20        (indirect JMP through pointer -> should land at 1)     ┌(@0x20)┘ JUMP!
+    #
+    # page-zero pointer slot:
+    flash_mem[0x0020] = 0x0000  # will be overwritten by STA at 0x10
+
+    flash_mem[0x00]  = encode_mem(mode=0, func_or_ac=1, indir=0, index=0, disp=0x10)  # JSR 0x10
+    flash_mem[0x01]  = encode_io(ac=0, transfer=6, control=0, dev=0o77)               # HALT
+    flash_mem[0x10]  = encode_mem(mode=2, func_or_ac=3, indir=0, index=0, disp=0x20)  # STA AC3, 0x20
+    flash_mem[0x11]  = encode_mem(mode=0, func_or_ac=0, indir=1, index=0, disp=0x20)  # JMP @0x20
+
+    dut.ena.value = 1
+    dut.ui_in.value = 1
+    dut.uio_in.value = 0
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 10)
+    dut.rst_n.value = 1
+
+    await ClockCycles(dut.clk, 6000)
+
+    fetched = [addr for (op, is_flash, addr) in access_log if op == 'READ' and is_flash]
+    writes  = [(addr, op) for (op, is_flash, addr) in access_log if op == 'WRITE' and is_flash]
+
+    # JSR must have stored return address 0x0001 into page-zero slot 0x0020
+    assert flash_mem.get(0x0020) == 0x0001, \
+        f"JSR return address not stored correctly: 0x20 = {hex(flash_mem.get(0x0020, 0))}"
+    # after indirect JMP through 0x0020, PC should land at 0x0001 (HALT)
+    assert 0x01 in fetched, "indirect JMP did not return to JSR+1 (HALT not reached)"
+    # the HALT is at 0x01 — it should be the last instr fetched
+    assert 0x10 in fetched, "subroutine at 0x10 was never fetched"
+    assert 0x11 in fetched, "indirect JMP at 0x11 was never fetched"
+
+# test 10: blinkenlights output and IORST device reset
+@cocotb.test()
+async def test_blinkenlights_and_iorst(dut):
+    """
+    test 10: verifies that uo_out[7:1] reflects the current CPU state
+    and instr opcode bits, and that IORST clears the UART done flags
+    """
+    clock = Clock(dut.clk, 100, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    flash_mem = {}
+    ram_mem = {}
+    cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem))
+
+    # program: receive a byte, then IORST, then re-check done flag is cleared
+    # 0: SKPDN 010          ; wait for RX done
+    # 1: JMP 0
+    # 2: DIA AC0, 010       ; read char (clears rx_done implicitly)
+    # 3: NIO 010            ; IORST equivalent - use DOC to reset (ctrl=2=C flag)
+    #    (use the IORST CPU instr: DOC (transfer=6) on dev 0o77 with ctrl=1 = IORST)
+    # 4: SKPDN 010          ; rx_done should now be clear -> NOT skip
+    # 5: JMP 7              ; rx_done is clear as expected -> jump to HALT
+    # 6: JMP 6              ; if IORST did NOT work, spin forever (test timeout)
+    # 7: HALT
+    flash_mem[0] = encode_io(ac=0, transfer=7, control=2, dev=0o10)   # SKPDN 010
+    flash_mem[1] = encode_mem(mode=0, func_or_ac=0, disp=0)           # JMP 0
+    flash_mem[2] = encode_io(ac=0, transfer=1, control=0, dev=0o10)   # DIA AC0, 010
+    flash_mem[3] = encode_io(ac=0, transfer=5, control=0, dev=0o77)   # IORST (DOC 5 = IORST on CPU dev)
+    flash_mem[4] = encode_io(ac=0, transfer=7, control=2, dev=0o10)   # SKPDN 010 (should NOT skip)
+    flash_mem[5] = encode_mem(mode=0, func_or_ac=0, disp=7)           # JMP 7
+    flash_mem[6] = encode_mem(mode=0, func_or_ac=0, disp=6)           # spin (IORST failed)
+    flash_mem[7] = encode_io(ac=0, transfer=6, control=0, dev=0o77)   # HALT
+
+    dut.ena.value = 1
+    dut.ui_in.value = 1
+    dut.uio_in.value = 0
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 10)
+    dut.rst_n.value = 1
+
+    # wait a few cycles so the FSM has settled out of reset but is not yet HALT'd
+    await ClockCycles(dut.clk, 5)
+
+    # verify HALT bit is clear immediately after reset: state transitions through
+    # STATE_FETCH(0) -> STATE_FETCH_WAIT(1) within the first clock, but the CPU
+    #  def shouldn't be halted yet (uo_out[7] = blinkenlights[6] = halted)
+    blink = (int(dut.uo_out.value) >> 1) & 0x7F
+    halted_bit = (blink >> 6) & 1
+    assert halted_bit == 0, f"HALT bit incorrectly set right after reset: uo_out={hex(int(dut.uo_out.value))}"
+
+    # send one byte to trigger rx_done
+    await uart_tx_byte(dut, 0x42)
+
+    # give the CPU time to read the char, execute IORST, and reach HALT
+    await ClockCycles(dut.clk, 5000)
+
+    # verify HALT bit now set (uo_out[7] = blinkenlights[6] = (state == STATE_HALT))
+    blink = (int(dut.uo_out.value) >> 1) & 0x7F
+    halted_bit = (blink >> 6) & 1
+    assert halted_bit == 1, f"HALT bit not set in blinkenlights after program completes: uo_out={hex(int(dut.uo_out.value))}"

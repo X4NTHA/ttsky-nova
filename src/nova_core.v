@@ -42,11 +42,17 @@ module nova_core (
     reg        tx_start_req;
     reg        io_clear_rx_done;
     reg        io_clear_tx_done;
-    reg [3:0]  state;
+    reg [2:0]  state;
     reg [1:0]  exec_cycle;
+    reg        ea_valid; // set after indirect resolve to avoid re-decoding
+
+    // pre-decoded I/O device fields (shared comparators)
+    wire is_kbd = (ir[15:10] == 6'o10);
+    wire is_prt = (ir[15:10] == 6'o11);
+    wire is_cpu = (ir[15:10] == 6'o77);
 
     // memory interface (nova_meow)
-    wire [14:0] mem_addr = (state == 4'd0 || state == 4'd1 || state == 4'd2) ? pc : ea;
+    wire [14:0] mem_addr = (state == 3'd0 || state == 3'd1) ? pc : ea;
     wire [15:0] mem_data_in;
     wire [15:0] isz_dsz_val = mem_data_in + (ir[4:3] == 2'b10 ? 16'd1 : 16'hFFFF);
     wire [15:0] mem_data_out = (ir[2:1] == 2'b10) ? ac_dst_val : isz_dsz_val;
@@ -278,35 +284,35 @@ module nova_core (
                                (ir[12] ? {ac_dst_val[3:0], ac_dst_val[15:4]} : shifted_res) :
                                {alu_result, ac_dst_val[15:4]};
 
-    // ALC skip condition evaluation (skip next instruction if condition is true)
+    // ALC skip condition eval (shared sub-expressions)
+    wire carry_zero  = !shifted_cout;
+    wire result_zero = (shifted_res == 16'h0000);
+
     reg alc_skip;
     always @(*) begin
         case (ir[15:13])
-            3'b000: alc_skip = 1'b0;                                          // never
-            3'b001: alc_skip = 1'b1;                                          // SKP (always)
-            3'b010: alc_skip = (shifted_cout == 1'b0);                        // SZC (skip zero carry)
-            3'b011: alc_skip = (shifted_cout == 1'b1);                        // SNC (skip non-zero carry)
-            3'b100: alc_skip = (shifted_res == 16'h0000);                     // SZR (skip zero result)
-            3'b101: alc_skip = (shifted_res != 16'h0000);                     // SNR (skip non-zero result)
-            3'b110: alc_skip = (shifted_cout == 1'b0 || shifted_res == 16'h0); // SEZ (skip either zero)
-            3'b111: alc_skip = (shifted_cout == 1'b1 && shifted_res != 16'h0); // SBN (skip both non-zero)
+            3'b000: alc_skip = 1'b0;                         // never
+            3'b001: alc_skip = 1'b1;                         // SKP (always)
+            3'b010: alc_skip = carry_zero;                   // SZC
+            3'b011: alc_skip = !carry_zero;                  // SNC
+            3'b100: alc_skip = result_zero;                  // SZR
+            3'b101: alc_skip = !result_zero;                 // SNR
+            3'b110: alc_skip = carry_zero | result_zero;     // SEZ
+            3'b111: alc_skip = !carry_zero & !result_zero;   // SBN
         endcase
     end
 
-    // IO device status and skip condition evaluation
-    wire io_dev_busy = (ir[15:10] == 6'o10) ? rx_busy :
-                       (ir[15:10] == 6'o11) ? tx_busy : 1'b0;
-
-    wire io_dev_done = (ir[15:10] == 6'o10) ? rx_done_flag :
-                       (ir[15:10] == 6'o11) ? tx_done_flag : 1'b0;
+    // I/O device status and skip (using pre-decoded device signals)
+    wire io_dev_busy = is_kbd ? rx_busy : (is_prt ? tx_busy : 1'b0);
+    wire io_dev_done = is_kbd ? rx_done_flag : (is_prt ? tx_done_flag : 1'b0);
 
     reg io_skip;
     always @(*) begin
         case (ir[9:8])
-            2'b00: io_skip = io_dev_busy;  // SKPBN (skip busy non-zero)
-            2'b01: io_skip = !io_dev_busy; // SKPBZ (skip busy zero / ready)
-            2'b10: io_skip = io_dev_done;  // SKPDN (skip done non-zero / complete)
-            2'b11: io_skip = !io_dev_done; // SKPDZ (skip done zero)
+            2'b00: io_skip = io_dev_busy;  // SKPBN
+            2'b01: io_skip = !io_dev_busy; // SKPBZ
+            2'b10: io_skip = io_dev_done;  // SKPDN
+            2'b11: io_skip = !io_dev_done; // SKPDZ
         endcase
     end
 
@@ -329,6 +335,7 @@ module nova_core (
             tx_start_req        <= 1'b0;
             io_clear_rx_done    <= 1'b0;
             io_clear_tx_done    <= 1'b0;
+            ea_valid            <= 1'b0;
         end else begin
             // default single-cycle strobe pulses
             tx_start_req     <= 1'b0;
@@ -338,6 +345,7 @@ module nova_core (
             case (state)
                 // instruction fetch: request 16-bit instruction word from SPI
                 STATE_FETCH: begin
+                    ea_valid     <= 1'b0;
                     mem_read_req <= 1'b1;
                     state        <= STATE_FETCH_WAIT;
                 end
@@ -352,12 +360,12 @@ module nova_core (
 
                 // instruction decode & branching
                 STATE_DECODE: begin
-                    if (ir[0] == 1'b1) begin
+                    if (ir[0]) begin
                         // arithmetic / logic class (ALC): enter 4-cycle nibble loop
                         state      <= STATE_EXEC_ALU;
                         exec_cycle <= 2'b00;
 
-                        // setup initial carry-in based on c-field ir[11:10] (Z=0, O=1, C=~C)
+                        // setup initial carry-in based on c-field ir[11:10]
                         case (ir[11:10])
                             2'b00: carry_intermediate <= carry_flag;
                             2'b01: carry_intermediate <= 1'b0;
@@ -365,13 +373,12 @@ module nova_core (
                             2'b11: carry_intermediate <= ~carry_flag;
                         endcase
                     end else if (ir[2:1] == 2'b11) begin
-                        // input / output class (I/O)
-                        if (ir[15:10] == 6'o77) begin
-                            // CPU control (Dev 0o77)
-                            if (ir[7:5] == 3'b110) begin // HALT (DOC 0, CPU)
+                        // input / output class (I/O) using pre-decoded device signals
+                        if (is_cpu) begin
+                            if (ir[7:5] == 3'b110) begin // HALT
                                 pc    <= pc + 15'd1;
                                 state <= STATE_HALT;
-                            end else if (ir[7:5] == 3'b101) begin // IORST (DICC 0, CPU)
+                            end else if (ir[7:5] == 3'b101) begin // IORST
                                 io_clear_rx_done <= 1'b1;
                                 io_clear_tx_done <= 1'b1;
                                 pc               <= pc + 15'd1;
@@ -381,15 +388,13 @@ module nova_core (
                                 state <= STATE_FETCH;
                             end
                         end else begin
-                            // standard I/O device (Keyboard 0o10 / Printer 0o11)
                             if (ir[7:5] == 3'b111) begin
-                                // SKP on device flag condition (SKPBN, SKPBZ, SKPDN, SKPDZ)
+                                // SKP on device flag condition
                                 pc    <= io_skip ? (pc + 15'd2) : (pc + 15'd1);
                                 state <= STATE_FETCH;
                             end else begin
-                                // data transfer (DIA: RX -> AC, DOA: AC -> TX)
-                                if (ir[7:5] == 3'b001 && ir[15:10] == 6'o10) begin
-                                    // DIA from keyboard: load RX shift buffer into AC[7:0], zero extend upper 8b
+                                // data transfer (DIA/DOA)
+                                if (ir[7:5] == 3'b001 && is_kbd) begin
                                     case (ir[4:3])
                                          2'b00: ac0 <= {8'h00, rx_shift_reg};
                                          2'b01: ac1 <= {8'h00, rx_shift_reg};
@@ -397,15 +402,14 @@ module nova_core (
                                          2'b11: ac3 <= {8'h00, rx_shift_reg};
                                     endcase
                                     io_clear_rx_done <= 1'b1;
-                                end else if (ir[7:5] == 3'b010 && ir[15:10] == 6'o11) begin
-                                    // DOA to printer: send AC[7:0] to UART TX transmitter
+                                end else if (ir[7:5] == 3'b010 && is_prt) begin
                                     tx_start_req <= 1'b1;
                                 end
 
-                                // explicit control: clear done flag if c-option (bits 9:8 == 2'b10)
+                                // clear done flag if c-option (bits 9:8 == 2'b10)
                                 if (ir[9:8] == 2'b10) begin
-                                    if (ir[15:10] == 6'o10) io_clear_rx_done <= 1'b1;
-                                    if (ir[15:10] == 6'o11) io_clear_tx_done <= 1'b1;
+                                    if (is_kbd) io_clear_rx_done <= 1'b1;
+                                    if (is_prt) io_clear_tx_done <= 1'b1;
                                 end
 
                                 pc    <= pc + 15'd1;
@@ -414,34 +418,36 @@ module nova_core (
                         end
                     end else begin
                         // memory reference class (MRC)
-                        ea <= calculated_ea;
-                        if (ir[5] == 1'b1) begin
+                        // ea_valid is set after indirect resolve, skip EA calc and indirect check
+                        if (!ea_valid) ea <= calculated_ea;
+
+                        if (ir[5] && !ea_valid) begin
                             // indirect deferral: fetch pointer word from memory
                             mem_read_req <= 1'b1;
                             state        <= STATE_INDIR_WAIT;
-                        end else if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
-                            // LDA (01), ISZ (00,10), DSZ (00,11)
+                        end else if (ir[2:1] == 2'b01 || ir[4]) begin
+                            // LDA / ISZ / DSZ
                             mem_read_req <= 1'b1;
                             state        <= STATE_MEM_RD_WAIT;
                         end else if (ir[2:1] == 2'b10) begin
-                            // STA (10)
+                            // STA
                             mem_write_req <= 1'b1;
                             state         <= STATE_MEM_WR_WAIT;
                         end else begin
-                            // JMP (00,00) / JSR (00,01)
-                            pc    <= calculated_ea;
-                            if (ir[3] == 1'b1) ac3 <= {1'b0, pc + 15'd1};
+                            // JMP / JSR
+                            pc    <= ea_valid ? ea : calculated_ea;
+                            if (ir[3]) ac3 <= {1'b0, pc + 15'd1};
                             state <= STATE_FETCH;
                         end
                     end
                 end
 
                 // ALC 4-cycle execution loop: nibble serial arithmetic
+                // only rotate source and dest ACs, other ACs hold
                 STATE_EXEC_ALU: begin
                     carry_intermediate <= alu_carry_out;
 
                     if (exec_cycle == 2'd3) begin
-                        // final cycle: apply shifter, skip, and no-load writeback suppression
                         carry_flag <= shifted_cout;
                         pc         <= alc_skip ? (pc + 15'd2) : (pc + 15'd1);
                         state      <= STATE_FETCH;
@@ -449,32 +455,32 @@ module nova_core (
                         exec_cycle <= exec_cycle + 2'd1;
                     end
 
-                    ac0 <= (ir[4:3] == 2'b00) ? next_dest_ac : {ac0[3:0], ac0[15:4]};
-                    ac1 <= (ir[4:3] == 2'b01) ? next_dest_ac : {ac1[3:0], ac1[15:4]};
-                    ac2 <= (ir[4:3] == 2'b10) ? next_dest_ac : {ac2[3:0], ac2[15:4]};
-                    ac3 <= (ir[4:3] == 2'b11) ? next_dest_ac : {ac3[3:0], ac3[15:4]};
+                    // dest AC: receives ALU result/shifted writeback
+                    case (ir[4:3])
+                        2'b00: ac0 <= next_dest_ac;
+                        2'b01: ac1 <= next_dest_ac;
+                        2'b10: ac2 <= next_dest_ac;
+                        2'b11: ac3 <= next_dest_ac;
+                    endcase
+
+                    // source AC: rotate to present next nibble (skip if same as dest)
+                    if (ir[2:1] != ir[4:3]) begin
+                        case (ir[2:1])
+                            2'b00: ac0 <= {ac0[3:0], ac0[15:4]};
+                            2'b01: ac1 <= {ac1[3:0], ac1[15:4]};
+                            2'b10: ac2 <= {ac2[3:0], ac2[15:4]};
+                            2'b11: ac3 <= {ac3[3:0], ac3[15:4]};
+                        endcase
+                    end
                 end
 
-                // indirect addressing deferral: dereference pointer from memory
+                // indirect addressing deferral: dereference pointer, then re-enter decode
                 STATE_INDIR_WAIT: begin
                     mem_read_req <= 1'b0;
                     if (!meow_busy) begin
-                        ea <= mem_data_in[14:0];
-                        // route deferred target operation with resolved address
-                        if (ir[2:1] == 2'b01 || ir[4] == 1'b1) begin
-                            // LDA (01), ISZ (00,10), DSZ (00,11)
-                            mem_read_req <= 1'b1;
-                            state        <= STATE_MEM_RD_WAIT;
-                        end else if (ir[2:1] == 2'b10) begin
-                            // STA (10)
-                            mem_write_req <= 1'b1;
-                            state         <= STATE_MEM_WR_WAIT;
-                        end else begin
-                            // JMP (00,00) / JSR (00,01)
-                            pc    <= mem_data_in[14:0];
-                            if (ir[3] == 1'b1) ac3 <= {1'b0, pc + 15'd1};
-                            state <= STATE_FETCH;
-                        end
+                        ea       <= mem_data_in[14:0];
+                        ea_valid <= 1'b1;
+                        state    <= STATE_DECODE;
                     end
                 end
 
