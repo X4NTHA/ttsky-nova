@@ -45,27 +45,34 @@ module nova_meow (
     assign spi_cs1_n = (cs_active &&  addr[14]) ? 1'b0 : 1'b1;
 
     // MOSI output bit generation
-    // frame breakdown:
-    //   bits 47..40: 8-bit command (8'h02 for write, 8'h03 for read)
-    //   bits 39..32: upper 8 address bits (always 8'h00)
-    //   bits 31..16: 16-bit address {addr[14:0], 1'b0}
-    //   bits 15..0 : 16-bit data_in
+    // frame decoded from bit_cnt[5:4]:
+    //   bit_cnt[5:4] == 2'b10 (47..32):
+    //     bit_cnt[3] == 1 (47..40): 8-bit command (8'h02 for write, 8'h03 for read)
+    //     bit_cnt[3] == 0 (39..32): upper 8 address bits (always 8'h00)
+    //   bit_cnt[5:4] == 2'b01 (31..16): 16-bit address {addr[14:0], 1'b0}
+    //   bit_cnt[5:4] == 2'b00 (15..0) : 16-bit data_in
     reg mosi_bit;
     always @(*) begin
-        if (bit_cnt >= 6'd40) begin
-            // command: 8'h02 (00000010) or 8'h03 (00000011)
-            case (bit_cnt[2:0])
-                3'd1:    mosi_bit = 1'b1;
-                3'd0:    mosi_bit = !is_write;
-                default: mosi_bit = 1'b0;
-            endcase
-        end else if (bit_cnt >= 6'd32) begin
-            mosi_bit = 1'b0; // upper 8 address bits are 0x00
-        end else if (bit_cnt >= 6'd16) begin
-            mosi_bit = (bit_cnt == 6'd16) ? 1'b0 : addr[bit_cnt[3:0] - 4'd1];
-        end else begin
-            mosi_bit = data_in[bit_cnt[3:0]];
-        end
+        case (bit_cnt[5:4])
+            2'b10: begin // 47..32 (command and upper addrs)
+                if (bit_cnt[3]) begin
+                    // command: 8'h02 (00000010) or 8'h03 (00000011)
+                    case (bit_cnt[2:0])
+                        3'd1:    mosi_bit = 1'b1;
+                        3'd0:    mosi_bit = !is_write;
+                        default: mosi_bit = 1'b0;
+                    endcase
+                end else begin
+                    mosi_bit = 1'b0; // upper 8 address bits are 0x00
+                end
+            end
+            2'b01: begin // 31..16 ({addr[14:0], 1'b0})
+                mosi_bit = (bit_cnt[3:0] == 4'd0) ? 1'b0 : addr[bit_cnt[3:0] - 4'd1];
+            end
+            default: begin // 15..0 (data_in)
+                mosi_bit = data_in[bit_cnt[3:0]];
+            end
+        endcase
     end
 
     always @(posedge clk or negedge rst_n) begin
@@ -81,9 +88,9 @@ module nova_meow (
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
-                        is_write  <= write_req;
-                        bit_cnt   <= 6'd47;
-                        state     <= S_CLK_LOW;
+                        is_write <= write_req;
+                        bit_cnt  <= 6'd47;
+                        state    <= S_CLK_LOW;
                     end
                 end
 

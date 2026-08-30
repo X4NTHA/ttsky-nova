@@ -61,8 +61,8 @@ module nova_core (
                            (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
 
     wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
-    wire [14:0] offset    = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} : {{7{ir[15]}}, ir[15:8]};
-    wire [14:0] calculated_ea = base_addr + offset;
+    wire [6:0]  offset_hi = (ir[7:6] == 2'b00) ? 7'b0 : {7{ir[15]}};
+    wire [14:0] calculated_ea = base_addr + {offset_hi, ir[15:8]};
 
     // memory interface (nova_meow)
     wire [14:0] active_ea = ea_valid ? ea : calculated_ea;
