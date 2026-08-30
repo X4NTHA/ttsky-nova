@@ -36,26 +36,47 @@ module nova_core (
     // destination accumulator value selected by ir[3] (0=ac0, 1=ac1)
     wire [15:0] ac_dst_val = ir[3] ? ac1 : ac0;
 
-    // peripheral control signals
-    reg        tx_start_req;
-    reg        io_clear_rx_done;
-    reg        io_clear_tx_done;
+    // core control FSM: major cycles and instruction execution
+    localparam STATE_FETCH         = 3'd0;
+    localparam STATE_FETCH_WAIT    = 3'd1;
+    localparam STATE_DECODE        = 3'd2;
+    localparam STATE_EXEC_ALU      = 3'd3;
+    localparam STATE_INDIR_WAIT    = 3'd4;
+    localparam STATE_MEM_RD_WAIT   = 3'd5;
+    localparam STATE_MEM_WR_WAIT   = 3'd6;
+    localparam STATE_HALT          = 3'd7;
+
     reg [2:0]  state;
     reg [1:0]  exec_cycle;
-    reg        ea_valid; // set after indirect resolve to avoid re-decoding
+    reg        ea_valid;
 
     // pre-decoded I/O device fields (shared comparators)
     wire is_kbd = (ir[15:10] == 6'o10);
     wire is_prt = (ir[15:10] == 6'o11);
     wire is_cpu = (ir[15:10] == 6'o77);
 
+    // effective address calculation for memory reference class (MRC)
+    // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
+    wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
+                           (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
+
+    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
+    wire [14:0] offset    = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} : {{7{ir[15]}}, ir[15:8]};
+    wire [14:0] calculated_ea = base_addr + offset;
+
     // memory interface (nova_meow)
-    wire [14:0] mem_addr = (state == 3'd0 || state == 3'd1) ? pc : ea;
+    wire [14:0] active_ea = ea_valid ? ea : calculated_ea;
+    wire [14:0] mem_addr = (state == STATE_FETCH || state == STATE_FETCH_WAIT) ? pc : active_ea;
     wire [15:0] mem_data_in;
     wire [15:0] mem_data_out = ac_dst_val;
-    reg         mem_read_req;
-    reg         mem_write_req;
     wire        meow_busy;
+
+    // combinational strobes for memory requests
+    wire mem_read_req = (state == STATE_FETCH) ||
+                        (state == STATE_DECODE && !ir[0] && ir[2:1] != 2'b11 &&
+                         (ir[5] && !ea_valid || ir[2:1] == 2'b01));
+
+    wire mem_write_req = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b10 && (!ir[5] || ea_valid));
 
     nova_meow meow_inst (
         .clk(clk),
@@ -108,6 +129,11 @@ module nova_core (
     reg       rx_done_flag;
     wire      rx_busy = (rx_bit_cnt != 4'd0);
 
+    // clear rx_done when CPU reads DIA from Keyboard, issues IORST, or c-clear
+    wire io_clear_rx_done = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11) &&
+                            ((is_cpu && ir[7:5] == 3'b101) ||
+                             (is_kbd && (ir[7:5] == 3'b001 || ir[9:8] == 2'b10)));
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rx_sync      <= 2'b11;
@@ -149,7 +175,7 @@ module nova_core (
                         // sample 8 data bits LSB first
                         rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
                     end else if (rx_bit_cnt == 4'd10) begin
-                        // stop bit reached
+                        // stop bit verif and latching
                         rx_done_flag <= 1'b1;
                     end
                 end
@@ -165,6 +191,11 @@ module nova_core (
 
     wire tx_busy = (tx_bit_cnt != 4'd0);
     assign uart_tx = tx_busy ? tx_shift_reg[0] : 1'b1;
+
+    wire tx_start_req = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11 && is_prt && ir[7:5] == 3'b010);
+    wire io_clear_tx_done = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11) &&
+                            ((is_cpu && ir[7:5] == 3'b101) ||
+                             (is_prt && ir[9:8] == 2'b10));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -201,25 +232,6 @@ module nova_core (
             end
         end
     end
-
-    // core control FSM: major cycles and instruction execution
-    localparam STATE_FETCH         = 3'd0;
-    localparam STATE_FETCH_WAIT    = 3'd1;
-    localparam STATE_DECODE        = 3'd2;
-    localparam STATE_EXEC_ALU      = 3'd3;
-    localparam STATE_INDIR_WAIT    = 3'd4;
-    localparam STATE_MEM_RD_WAIT   = 3'd5;
-    localparam STATE_MEM_WR_WAIT   = 3'd6;
-    localparam STATE_HALT          = 3'd7;
-
-    // effective address calculation for memory reference class (MRC)
-    // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
-    wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
-                           (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
-
-    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
-    wire [14:0] offset    = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} : {{7{ir[15]}}, ir[15:8]};
-    wire [14:0] calculated_ea = base_addr + offset;
 
     // ALC shifter logic (applied on cycle 3 once full 16-bit word is reassembled)
     wire [15:0] raw_res_word = {alu_result, ac_dst_val[15:4]};
@@ -287,28 +299,16 @@ module nova_core (
             carry_intermediate <= 1'b0;
             ea                  <= 15'd0;
             exec_cycle          <= 2'd0;
-            mem_read_req        <= 1'b0;
-            mem_write_req       <= 1'b0;
-            tx_start_req        <= 1'b0;
-            io_clear_rx_done    <= 1'b0;
-            io_clear_tx_done    <= 1'b0;
             ea_valid            <= 1'b0;
         end else begin
-            // default single-cycle strobe pulses
-            tx_start_req     <= 1'b0;
-            io_clear_rx_done <= 1'b0;
-            io_clear_tx_done <= 1'b0;
-
             case (state)
                 // instruction fetch: request 16-bit instruction word from SPI
                 STATE_FETCH: begin
-                    ea_valid     <= 1'b0;
-                    mem_read_req <= 1'b1;
-                    state        <= STATE_FETCH_WAIT;
+                    ea_valid <= 1'b0;
+                    state    <= STATE_FETCH_WAIT;
                 end
 
                 STATE_FETCH_WAIT: begin
-                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         ir    <= mem_data_in;
                         state <= STATE_DECODE;
@@ -331,65 +331,30 @@ module nova_core (
                         endcase
                     end else if (ir[2:1] == 2'b11) begin
                         // input / output class (I/O) using pre-decoded device signals
-                        if (is_cpu) begin
-                            if (ir[7:5] == 3'b110) begin // HALT
-                                pc    <= pc + 15'd1;
-                                state <= STATE_HALT;
-                            end else if (ir[7:5] == 3'b101) begin // IORST
-                                io_clear_rx_done <= 1'b1;
-                                io_clear_tx_done <= 1'b1;
-                                pc               <= pc + 15'd1;
-                                state            <= STATE_FETCH;
-                            end else begin
-                                pc    <= pc + 15'd1;
-                                state <= STATE_FETCH;
-                            end
-                        end else begin
-                            if (ir[7:5] == 3'b111) begin
-                                // SKP on device flag condition
-                                pc    <= io_skip ? (pc + 15'd2) : (pc + 15'd1);
-                                state <= STATE_FETCH;
-                            end else begin
-                                // data transfer (DIA/DOA)
-                                if (ir[7:5] == 3'b001 && is_kbd) begin
-                                    if (ir[3])
-                                        ac1 <= {8'h00, rx_shift_reg};
-                                    else
-                                        ac0 <= {8'h00, rx_shift_reg};
-                                    io_clear_rx_done <= 1'b1;
-                                end else if (ir[7:5] == 3'b010 && is_prt) begin
-                                    tx_start_req <= 1'b1;
-                                end
+                        pc    <= (ir[7:5] == 3'b111 && io_skip) ? (pc + 15'd2) : (pc + 15'd1);
+                        state <= (is_cpu && ir[7:5] == 3'b110) ? STATE_HALT : STATE_FETCH;
 
-                                // clear done flag if c-option (bits 9:8 == 2'b10)
-                                if (ir[9:8] == 2'b10) begin
-                                    if (is_kbd) io_clear_rx_done <= 1'b1;
-                                    if (is_prt) io_clear_tx_done <= 1'b1;
-                                end
-
-                                pc    <= pc + 15'd1;
-                                state <= STATE_FETCH;
-                            end
+                        if (!is_cpu && ir[7:5] == 3'b001 && is_kbd) begin
+                            // DIA: read byte from keeb shift reg
+                            if (ir[3])
+                                ac1 <= {8'h00, rx_shift_reg};
+                            else
+                                ac0 <= {8'h00, rx_shift_reg};
                         end
                     end else begin
                         // memory reference class (MRC): JMP, JSR, LDA, STA
-                        if (!ea_valid) ea <= calculated_ea;
-
                         if (ir[5] && !ea_valid) begin
                             // indirect deferral: fetch pointer word from memory
-                            mem_read_req <= 1'b1;
-                            state        <= STATE_INDIR_WAIT;
+                            state <= STATE_INDIR_WAIT;
                         end else if (ir[2:1] == 2'b01) begin
                             // LDA
-                            mem_read_req <= 1'b1;
-                            state        <= STATE_MEM_RD_WAIT;
+                            state <= STATE_MEM_RD_WAIT;
                         end else if (ir[2:1] == 2'b10) begin
                             // STA
-                            mem_write_req <= 1'b1;
-                            state         <= STATE_MEM_WR_WAIT;
+                            state <= STATE_MEM_WR_WAIT;
                         end else begin
                             // JMP / JSR (ir[2:1] == 2'b00)
-                            pc    <= ea_valid ? ea : calculated_ea;
+                            pc    <= active_ea;
                             if (ir[3]) ac1 <= {1'b0, pc + 15'd1}; // JSR: return addr in ac1
                             state <= STATE_FETCH;
                         end
@@ -425,7 +390,6 @@ module nova_core (
 
                 // indirect addressing deferral: dereference pointer, then re-enter decode
                 STATE_INDIR_WAIT: begin
-                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         ea       <= mem_data_in[14:0];
                         ea_valid <= 1'b1;
@@ -435,7 +399,6 @@ module nova_core (
 
                 // memory read (LDA only) (RIP ISZ/DSZ)
                 STATE_MEM_RD_WAIT: begin
-                    mem_read_req <= 1'b0;
                     if (!meow_busy) begin
                         if (ir[3])
                             ac1 <= mem_data_in;
@@ -448,7 +411,6 @@ module nova_core (
 
                 // memory write (STA only)
                 STATE_MEM_WR_WAIT: begin
-                    mem_write_req <= 1'b0;
                     if (!meow_busy) begin
                         pc    <= pc + 15'd1;
                         state <= STATE_FETCH;
