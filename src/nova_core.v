@@ -37,17 +37,19 @@ module nova_core (
     wire [15:0] ac_dst_val = ir[3] ? ac1 : ac0;
 
     // core control FSM: major cycles and instruction execution
-    localparam STATE_FETCH         = 3'd0;
-    localparam STATE_FETCH_WAIT    = 3'd1;
-    localparam STATE_DECODE        = 3'd2;
-    localparam STATE_EXEC_ALU      = 3'd3;
-    localparam STATE_INDIR_WAIT    = 3'd4;
-    localparam STATE_MEM_RD_WAIT   = 3'd5;
-    localparam STATE_MEM_WR_WAIT   = 3'd6;
-    localparam STATE_HALT          = 3'd7;
+    localparam STATE_FETCH         = 4'd0;
+    localparam STATE_FETCH_WAIT    = 4'd1;
+    localparam STATE_DECODE        = 4'd2;
+    localparam STATE_ALU_0         = 4'd3;
+    localparam STATE_ALU_1         = 4'd4;
+    localparam STATE_ALU_2         = 4'd5;
+    localparam STATE_ALU_3         = 4'd6;
+    localparam STATE_INDIR_WAIT    = 4'd7;
+    localparam STATE_MEM_RD_WAIT   = 4'd8;
+    localparam STATE_MEM_WR_WAIT   = 4'd9;
+    localparam STATE_HALT          = 4'd10;
 
-    reg [2:0]  state;
-    reg [1:0]  exec_cycle;
+    reg [3:0]  state;
     reg        ea_valid;
 
     // pre-decoded I/O device fields (shared comparators)
@@ -110,7 +112,7 @@ module nova_core (
         .b_nib(alu_in_b),
         .carry_in(carry_intermediate),
         .opcode(ir[7:5]),
-        .is_first_cycle(exec_cycle == 2'b00),
+        .is_first_cycle(state == STATE_ALU_0),
         .result(alu_result),
         .carry_out(alu_carry_out)
     );
@@ -119,10 +121,9 @@ module nova_core (
     localparam BAUD_DIV = 7'd87;
     localparam HALF_BAUD = 7'd43;
 
-    // UART RX: 2-stage synchronizer, mid-bit sampling, start-glitch rejection
-    reg [1:0] rx_sync;
-    wire      rx_pin = rx_sync[1];
-
+    // UART RX: input synchronizer, mid-bit sampling, start-glitch rejection
+    reg       rx_sync;
+    wire      rx_pin  = rx_sync;
     reg [6:0] rx_baud_cnt;
     reg [3:0] rx_bit_cnt;
     reg [7:0] rx_shift_reg;
@@ -138,14 +139,14 @@ module nova_core (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rx_sync      <= 2'b11;
+            rx_sync      <= 1'b1;
             rx_baud_cnt  <= 7'd0;
             rx_bit_cnt   <= 4'd0;
             rx_shift_reg <= 8'd0;
             rx_done_flag <= 1'b0;
         end else begin
-            // 2-stage input synchronizer
-            rx_sync <= {rx_sync[0], uart_rx};
+            // input synchronizer
+            rx_sync <= uart_rx;
 
             // clear rx_done_flag if CPU reads DIA (Dev 0o10) or issues CLR pulse
             if (io_clear_rx_done) begin
@@ -259,7 +260,7 @@ module nova_core (
                         (ir[9:8] == 2'b10) ? raw_res_word[0] : raw_cout;
 
     // ALC destination accumulator writeback value
-    wire [15:0] next_dest_ac = (exec_cycle == 2'd3) ?
+    wire [15:0] next_dest_ac = (state == STATE_ALU_3) ?
                                (ir[12] ? {ac_dst_val[3:0], ac_dst_val[15:4]} : shifted_res) :
                                {alu_result, ac_dst_val[15:4]};
 
@@ -294,7 +295,6 @@ module nova_core (
             carry_flag          <= 1'b0;
             carry_intermediate <= 1'b0;
             ea                  <= 15'd0;
-            exec_cycle          <= 2'd0;
             ea_valid            <= 1'b0;
         end else begin
             case (state)
@@ -314,9 +314,8 @@ module nova_core (
                 // instruction decode & branching
                 STATE_DECODE: begin
                     if (ir[0]) begin
-                        // arithmetic / logic class (ALC): enter 4-cycle nibble loop
-                        state      <= STATE_EXEC_ALU;
-                        exec_cycle <= 2'b00;
+                        // arithmetic / logic class (ALC): enter 4-cycle nibble sequence
+                        state <= STATE_ALU_0;
 
                         // setup initial carry-in based on c-field ir[11:10]
                         case (ir[11:10])
@@ -357,19 +356,27 @@ module nova_core (
                     end
                 end
 
-                // ALC 4-cycle execution loop: nibble serial arithmetic
-                STATE_EXEC_ALU: begin
+                // ALC 4-cycle execution sequence: nibble serial arithmetic
+                STATE_ALU_0, STATE_ALU_1, STATE_ALU_2: begin
                     carry_intermediate <= alu_carry_out;
-
-                    if (exec_cycle == 2'd3) begin
-                        carry_flag <= shifted_cout;
-                        pc         <= alc_skip ? (pc + 15'd2) : (pc + 15'd1);
-                        state      <= STATE_FETCH;
-                    end else begin
-                        exec_cycle <= exec_cycle + 2'd1;
-                    end
+                    state              <= state + 4'd1;
 
                     // dest AC receives ALU writeback, other AC rotates if source
+                    if (ir[3]) begin
+                        ac1 <= next_dest_ac;
+                        if (!ir[1]) ac0 <= {ac0[3:0], ac0[15:4]};
+                    end else begin
+                        ac0 <= next_dest_ac;
+                        if (ir[1]) ac1 <= {ac1[3:0], ac1[15:4]};
+                    end
+                end
+
+                STATE_ALU_3: begin
+                    carry_flag <= shifted_cout;
+                    pc         <= alc_skip ? (pc + 15'd2) : (pc + 15'd1);
+                    state      <= STATE_FETCH;
+
+                    // final nibble writeback
                     if (ir[3]) begin
                         ac1 <= next_dest_ac;
                         if (!ir[1]) ac0 <= {ac0[3:0], ac0[15:4]};
