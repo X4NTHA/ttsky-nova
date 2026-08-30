@@ -31,11 +31,12 @@ module nova_meow (
     localparam S_DONE     = 2'd3;
 
     reg [1:0]  state;
-    reg [5:0]  bit_cnt;
-    reg [15:0] rx_shift;
+    reg [1:0]  phase;       // 0 = CMD+UpperAddr, 1 = Address, 2 = Data
+    reg [3:0]  bit_idx;     // 4-bit nibble/word bit index (15 down to 0)
+    reg [15:0] shift_reg;   // unified 16-bit shift transceiver for MOSI & MISO
     reg        is_write;
 
-    assign data_out = rx_shift;
+    assign data_out = shift_reg;
     assign busy = (state != S_IDLE) || read_req || write_req;
 
     // chip selects derived combinationally from addr[14] + transaction active
@@ -44,73 +45,60 @@ module nova_meow (
     assign spi_cs0_n = (cs_active && !addr[14]) ? 1'b0 : 1'b1;
     assign spi_cs1_n = (cs_active &&  addr[14]) ? 1'b0 : 1'b1;
 
-    // MOSI output bit generation
-    // frame decoded from bit_cnt[5:4]:
-    //   bit_cnt[5:4] == 2'b10 (47..32):
-    //     bit_cnt[3] == 1 (47..40): 8-bit command (8'h02 for write, 8'h03 for read)
-    //     bit_cnt[3] == 0 (39..32): upper 8 address bits (always 8'h00)
-    //   bit_cnt[5:4] == 2'b01 (31..16): 16-bit address {addr[14:0], 1'b0}
-    //   bit_cnt[5:4] == 2'b00 (15..0) : 16-bit data_in
-    reg mosi_bit;
-    always @(*) begin
-        case (bit_cnt[5:4])
-            2'b10: begin // 47..32 (command and upper addrs)
-                if (bit_cnt[3]) begin
-                    // command: 8'h02 (00000010) or 8'h03 (00000011)
-                    case (bit_cnt[2:0])
-                        3'd1:    mosi_bit = 1'b1;
-                        3'd0:    mosi_bit = !is_write;
-                        default: mosi_bit = 1'b0;
-                    endcase
-                end else begin
-                    mosi_bit = 1'b0; // upper 8 address bits are 0x00
-                end
-            end
-            2'b01: begin // 31..16 ({addr[14:0], 1'b0})
-                mosi_bit = (bit_cnt[3:0] == 4'd0) ? 1'b0 : addr[bit_cnt[3:0] - 4'd1];
-            end
-            default: begin // 15..0 (data_in)
-                mosi_bit = data_in[bit_cnt[3:0]];
-            end
-        endcase
-    end
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             spi_sck   <= 1'b0;
             spi_mosi  <= 1'b0;
             state     <= S_IDLE;
-            rx_shift  <= 16'd0;
-            bit_cnt   <= 6'd0;
+            phase     <= 2'd0;
+            bit_idx   <= 4'd0;
+            shift_reg <= 16'd0;
             is_write  <= 1'b0;
         end else begin
             case (state)
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
-                        is_write <= write_req;
-                        bit_cnt  <= 6'd47;
-                        state    <= S_CLK_LOW;
+                        is_write  <= write_req;
+                        phase     <= 2'd0;
+                        bit_idx   <= 4'd15;
+                        // Phase 0: 8-bit command (0x02 write, 0x03 read) + 8-bit 0x00 upper address
+                        shift_reg <= {6'b000000, 1'b1, !write_req, 8'h00};
+                        state     <= S_CLK_LOW;
                     end
                 end
 
-                // SCK low phase: drive MOSI bit
+                // SCK low phase: drive MOSI bit directly from shift register MSB
                 S_CLK_LOW: begin
                     spi_sck  <= 1'b0;
-                    spi_mosi <= mosi_bit;
+                    spi_mosi <= shift_reg[15];
                     state    <= S_CLK_HIGH;
                 end
 
-                // SCK high phase: sample MISO bit on rising edge
+                // SCK high phase: sample MISO bit into shift register LSB
                 S_CLK_HIGH: begin
-                    spi_sck <= 1'b1;
-                    if (!is_write)
-                        rx_shift <= {rx_shift[14:0], spi_miso};
+                    spi_sck   <= 1'b1;
+                    shift_reg <= {shift_reg[14:0], spi_miso};
 
-                    if (bit_cnt == 6'd0)
-                        state <= S_DONE;
-                    else begin
-                        bit_cnt <= bit_cnt - 6'd1;
+                    if (bit_idx == 4'd0) begin
+                        if (phase == 2'd0) begin
+                            // Advance to Phase 1: 16-bit word address {addr[14:0], 1'b0}
+                            phase     <= 2'd1;
+                            bit_idx   <= 4'd15;
+                            shift_reg <= {addr[14:0], 1'b0};
+                            state     <= S_CLK_LOW;
+                        end else if (phase == 2'd1) begin
+                            // Advance to Phase 2: 16-bit data
+                            phase     <= 2'd2;
+                            bit_idx   <= 4'd15;
+                            shift_reg <= data_in;
+                            state     <= S_CLK_LOW;
+                        end else begin
+                            // Phase 2 complete: transaction done
+                            state <= S_DONE;
+                        end
+                    end else begin
+                        bit_idx <= bit_idx - 4'd1;
                         state   <= S_CLK_LOW;
                     end
                 end
