@@ -34,16 +34,15 @@ module nova_meow (
     reg [5:0]  bit_cnt;
     reg [15:0] rx_shift;
     reg        is_write;
-    reg        cs_select; // 0 = Flash (CS0#), 1 = PSRAM (CS1#)
 
     assign data_out = rx_shift;
     assign busy = (state != S_IDLE) || read_req || write_req;
 
-    // chip selects derived combinationally from cs_select + transaction active
+    // chip selects derived combinationally from addr[14] + transaction active
     // CS stays asserted through S_DONE for proper SPI hold time
     wire cs_active = (state != S_IDLE);
-    assign spi_cs0_n = (cs_active && !cs_select) ? 1'b0 : 1'b1;
-    assign spi_cs1_n = (cs_active &&  cs_select) ? 1'b0 : 1'b1;
+    assign spi_cs0_n = (cs_active && !addr[14]) ? 1'b0 : 1'b1;
+    assign spi_cs1_n = (cs_active &&  addr[14]) ? 1'b0 : 1'b1;
 
     // MOSI output bit generation
     // frame breakdown:
@@ -77,14 +76,12 @@ module nova_meow (
             rx_shift  <= 16'd0;
             bit_cnt   <= 6'd0;
             is_write  <= 1'b0;
-            cs_select <= 1'b0;
         end else begin
             case (state)
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
                         is_write  <= write_req;
-                        cs_select <= addr[14];
                         bit_cnt   <= 6'd47;
                         state     <= S_CLK_LOW;
                     end

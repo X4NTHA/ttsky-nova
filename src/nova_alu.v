@@ -18,11 +18,10 @@ module nova_alu (
 
     // operand selection for single shared arithmetic adder
     // ADD (110) & INC (011) use A; NEG (001), ADC (100), SUB (101) use ~A
-    wire [3:0] op_a = (opcode == 3'b011 || opcode == 3'b110) ? a_nib : ~a_nib;
+    wire [3:0] op_a = opcode[1] ? a_nib : ~a_nib;
 
     // ADD (110), ADC (100), SUB (101) use B; INC (011) uses 1 on first cycle; NEG (001) uses 0
-    wire [3:0] op_b = (opcode == 3'b110 || opcode == 3'b100 || opcode == 3'b101) ? b_nib :
-                      (opcode == 3'b011 && is_first_cycle) ? 4'd1 : 4'd0;
+    wire [3:0] op_b = opcode[2] ? b_nib : {3'b000, opcode[1] & is_first_cycle};
 
     wire [4:0] adder_sum = {1'b0, op_a} + {1'b0, op_b} + {4'b0, carry_in};
 
