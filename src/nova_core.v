@@ -53,18 +53,18 @@ module nova_core (
     reg        ea_valid;
 
     // pre-decoded I/O device fields (shared comparators)
-    wire dev_is_ser = (ir[15:11] == 5'b00100);
-    wire is_kbd     = dev_is_ser && !ir[10];
-    wire is_prt     = dev_is_ser &&  ir[10];
-    wire is_cpu     = (ir[15:10] == 6'o77);
+    wire is_kbd = (ir[15:10] == 6'o10);
+    wire is_prt = (ir[15:10] == 6'o11);
+    wire is_cpu = (ir[15:10] == 6'o77);
 
     // effective address calculation for memory reference class (MRC)
     // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
     wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
                            (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
 
-    wire [14:0] rel_addr      = rel_base + {{7{ir[15]}}, ir[15:8]};
-    wire [14:0] calculated_ea = (ir[7:6] == 2'b00) ? {7'd0, ir[15:8]} : rel_addr;
+    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
+    wire [6:0]  offset_hi = (ir[7:6] == 2'b00) ? 7'b0 : {7{ir[15]}};
+    wire [14:0] calculated_ea = base_addr + {offset_hi, ir[15:8]};
 
     // memory interface (nova_meow)
     wire [14:0] active_ea = ea_valid ? ea : calculated_ea;
@@ -186,7 +186,7 @@ module nova_core (
         end
     end
 
-    // UART TX: 8N1 serial frame transmitter
+    // UART TX: 8N1 serial frame transmitter (static data latch, up-counter index)
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
     reg [7:0] tx_data;
@@ -196,12 +196,15 @@ module nova_core (
 
     reg tx_out_bit;
     always @(*) begin
-        case (tx_bit_cnt)
-            4'd10:   tx_out_bit = 1'b0;                                // START bit
-            4'd1:    tx_out_bit = 1'b1;                                // STOP bit
-            4'd0:    tx_out_bit = 1'b1;                                // IDLE
-            default: tx_out_bit = tx_data[3'(4'd9 - tx_bit_cnt)];     // data bits 0..7
-        endcase
+        if (tx_bit_cnt == 4'd0) begin
+            tx_out_bit = 1'b1;                                // IDLE
+        end else if (tx_bit_cnt == 4'd1) begin
+            tx_out_bit = 1'b0;                                // START bit
+        end else if (tx_bit_cnt == 4'd10) begin
+            tx_out_bit = 1'b1;                                // STOP bit
+        end else begin
+            tx_out_bit = tx_data[tx_bit_cnt[2:0] - 3'd2];     // data bits 0..7 (counts 2..9)
+        end
     end
     assign uart_tx = tx_out_bit;
 
@@ -223,17 +226,17 @@ module nova_core (
                 if (tx_start_req) begin
                     tx_data      <= ac_dst_val[7:0];
                     tx_baud_cnt  <= 7'd0;
-                    tx_bit_cnt   <= 4'd10;
+                    tx_bit_cnt   <= 4'd1;
                     tx_done_flag <= 1'b0;
                 end
             end else begin
                 if (tx_baud_cnt == BAUD_DIV - 7'd1) begin
                     tx_baud_cnt <= 7'd0;
-                    if (tx_bit_cnt == 4'd1) begin
+                    if (tx_bit_cnt == 4'd10) begin
                         tx_done_flag <= 1'b1;
                         tx_bit_cnt   <= 4'd0;
                     end else begin
-                        tx_bit_cnt <= tx_bit_cnt - 4'd1;
+                        tx_bit_cnt <= tx_bit_cnt + 4'd1;
                     end
                 end else begin
                     tx_baud_cnt <= tx_baud_cnt + 7'd1;
