@@ -222,20 +222,36 @@ async def test_alu_matrix(dut):
     access_log = []
     cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem, access_log))
 
+    # test 1: ALU, shifter, carry & skip matrix (using AC0, AC1)
+    # 0:  COM AC0, AC0       -> AC0 = 0xFFFF, carry = 0
+    # 1:  INC AC0, AC1 (c=0) -> AC1 = 0x0000, carry = 1 (wrap)
+    # 2:  ADD AC0, AC1       -> AC1 = 0xFFFF, carry = 0
+    # 3:  NEG AC0, AC1 (c=1) -> AC1 = 0x0001, carry = 1
+    # 4:  AND AC0, AC1       -> AC1 = 0x0001, carry = 1
+    # 5:  SUB AC1, AC0 (c=1) -> AC0 = 0xFFFE, carry = 1
+    # 6:  ADC AC1, AC0 (c=0) -> AC0 = 0xFFFC, carry = 1
+    # 7:  MOVL AC1, AC1 (c=0)-> AC1 = 0x0002 (rotate left through carry=0)
+    # 8:  MOVR AC1, AC1 (c=1)-> AC1 = 0x8001 (rotate right through carry=1)
+    # 9:  MOVS AC0, AC0      -> AC0 = 0xFCFF (swap bytes)
+    # 10: MOV# AC1, AC1 SZR  -> AC1!=0 -> NOT skip 11
+    # 11: sentinel (executed)
+    # 12: MOV# AC1, AC1 SNR  -> AC1!=0 -> SNR -> skip 13
+    # 13: sentinel (skipped)
+    # 14: HALT
     flash_mem[0]  = encode_alc(acs=0, acd=0, op=0)                                # COM AC0, AC0 -> 0xFFFF
-    flash_mem[1]  = encode_alc(acs=0, acd=1, op=3, carry=1)                       # INC AC0, AC1 (c=0) -> 0x0000, cout=1
-    flash_mem[2]  = encode_alc(acs=0, acd=1, op=6, carry=0)                       # ADD AC0, AC1 -> 0x0000, cout=1
-    flash_mem[3]  = encode_alc(acs=0, acd=2, op=1, carry=2)                       # NEG AC0, AC2 (c=1) -> 0x0001
-    flash_mem[4]  = encode_alc(acs=0, acd=2, op=7)                                # AND AC0, AC2 -> 0x0001
-    flash_mem[5]  = encode_alc(acs=2, acd=0, op=5, carry=2)                       # SUB AC2, AC0 (c=1) -> 0xFFFE
-    flash_mem[6]  = encode_alc(acs=2, acd=0, op=4, carry=1)                       # ADC AC2, AC0 (c=0) -> 0xFFFC
-    flash_mem[7]  = encode_alc(acs=2, acd=2, op=2, shift=1, carry=1)              # MOVL AC2, AC2 (c=0) -> 0x0002
-    flash_mem[8]  = encode_alc(acs=2, acd=2, op=2, shift=2, carry=2)              # MOVR AC2, AC2 (c=1) -> 0x8001
+    flash_mem[1]  = encode_alc(acs=0, acd=1, op=3, carry=1)                       # INC AC0, AC1 (c=0) -> 0x0000
+    flash_mem[2]  = encode_alc(acs=0, acd=1, op=6, carry=0)                       # ADD AC0, AC1 -> 0xFFFF
+    flash_mem[3]  = encode_alc(acs=0, acd=1, op=1, carry=2)                       # NEG AC0, AC1 (c=1) -> 0x0001
+    flash_mem[4]  = encode_alc(acs=0, acd=1, op=7)                                # AND AC0, AC1 -> 0x0001
+    flash_mem[5]  = encode_alc(acs=1, acd=0, op=5, carry=2)                       # SUB AC1, AC0 (c=1) -> 0xFFFE
+    flash_mem[6]  = encode_alc(acs=1, acd=0, op=4, carry=1)                       # ADC AC1, AC0 (c=0) -> 0xFFFC
+    flash_mem[7]  = encode_alc(acs=1, acd=1, op=2, shift=1, carry=1)              # MOVL AC1, AC1 (c=0) -> 0x0002
+    flash_mem[8]  = encode_alc(acs=1, acd=1, op=2, shift=2, carry=2)              # MOVR AC1, AC1 (c=1) -> 0x8001
     flash_mem[9]  = encode_alc(acs=0, acd=0, op=2, shift=3)                       # MOVS AC0, AC0 -> 0xFCFF
-    flash_mem[10] = encode_alc(acs=1, acd=1, op=2, no_load=1, skip=4)             # MOV# SZR (AC1==0 -> skips 11)
-    flash_mem[11] = encode_alc(acs=0, acd=0, op=0)                                # skipped NOP
-    flash_mem[12] = encode_alc(acs=2, acd=2, op=2, no_load=1, skip=5)             # MOV# SNR (AC2!=0 -> skips 13)
-    flash_mem[13] = encode_alc(acs=0, acd=0, op=0)                                # skipped NOP
+    flash_mem[10] = encode_alc(acs=1, acd=1, op=2, no_load=1, skip=4)             # MOV# SZR (AC1!=0 -> does NOT skip 11)
+    flash_mem[11] = encode_alc(acs=0, acd=0, op=0)                                # sentinel (must be fetched)
+    flash_mem[12] = encode_alc(acs=1, acd=1, op=2, no_load=1, skip=5)             # MOV# SNR (AC1!=0 -> skips 13)
+    flash_mem[13] = encode_alc(acs=0, acd=0, op=0)                                # skipped sentinel
     flash_mem[14] = encode_io(ac=0, transfer=6, control=0, dev=0o77)              # HALT
 
     # apply reset
@@ -250,8 +266,8 @@ async def test_alu_matrix(dut):
 
     fetched_addrs = [addr for (op, is_flash, addr) in access_log if op == 'READ' and is_flash]
     assert 0 in fetched_addrs, "PC=0 was not fetched."
-    assert 10 in fetched_addrs, "PC=10 (SZR skip) was not fetched."
-    assert 11 not in fetched_addrs, "PC=11 was executed despite SZR skip condition!"
+    assert 10 in fetched_addrs, "PC=10 was not fetched."
+    assert 11 in fetched_addrs, "PC=11 should be executed (SZR condition false)!"
     assert 12 in fetched_addrs, "PC=12 (SNR skip) was not fetched."
     assert 13 not in fetched_addrs, "PC=13 was executed despite SNR skip condition!"
     assert 14 in fetched_addrs, "PC=14 (HALT) was not reached."
@@ -274,16 +290,25 @@ async def test_memory_reference(dut):
     flash_mem[0x0020] = 0x1234      # page zero data
     flash_mem[0x0021] = 0x4010      # pointer into PSRAM
     ram_mem[0x4010]   = 0xABCD      # PSRAM initial data
-    flash_mem[0x0022] = 0x0001      # target for DSZ
+    ram_mem[0x4012]   = 0x5678      # target for indexed load
 
+    # 0: LDA AC0, Page0 0x20   -> AC0 = 0x1234
+    # 1: LDA AC1, @0x21        -> AC1 = 0xABCD (reads PSRAM 0x4010)
+    # 2: STA AC1, @0x21        -> writeback 0xABCD to PSRAM 0x4010
+    # 3: JSR .+3               -> PC = 6, AC1 = return address 4
+    # 4: skipped sentinel
+    # 5: skipped sentinel
+    # 6: LDA AC0, 0x21         -> AC0 = 0x4010
+    # 7: LDA AC1, 2,0          -> AC1 = RAM[AC0+2] = RAM[0x4012] = 0x5678 (AC0-indexed)
+    # 8: HALT
     flash_mem[0] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x20) # LDA AC0, Page0 0x20
     flash_mem[1] = encode_mem(mode=1, func_or_ac=1, indir=1, index=0, disp=0x21) # LDA AC1, @0x21 (PSRAM)
     flash_mem[2] = encode_mem(mode=2, func_or_ac=1, indir=1, index=0, disp=0x21) # STA AC1, @0x21
-    flash_mem[3] = encode_mem(mode=0, func_or_ac=2, indir=0, index=0, disp=0x20) # ISZ 0x20
-    flash_mem[4] = encode_mem(mode=0, func_or_ac=3, indir=0, index=0, disp=0x22) # DSZ 0x22 (skips 5)
-    flash_mem[5] = encode_mem(mode=0, func_or_ac=0, indir=0, index=0, disp=0x00) # JMP 0 (skipped)
-    flash_mem[6] = encode_mem(mode=0, func_or_ac=1, indir=0, index=1, disp=2)    # JSR PC+2 -> PC=8
-    flash_mem[7] = encode_mem(mode=0, func_or_ac=0, indir=0, index=0, disp=0x00) # skipped
+    flash_mem[3] = encode_mem(mode=0, func_or_ac=1, indir=0, index=1, disp=3)    # JSR PC+3 -> PC=6 (stores 4 in AC1)
+    flash_mem[4] = encode_alc(acs=0, acd=0, op=0)                                # skipped sentinel
+    flash_mem[5] = encode_alc(acs=0, acd=0, op=0)                                # skipped sentinel
+    flash_mem[6] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x21) # LDA AC0, 0x21 (0x4010)
+    flash_mem[7] = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=2)    # LDA AC1, 2,0 (AC0-indexed -> 0x4012)
     flash_mem[8] = encode_io(ac=0, transfer=6, control=0, dev=0o77)              # HALT
 
     dut.ena.value = 1
@@ -295,13 +320,13 @@ async def test_memory_reference(dut):
 
     await ClockCycles(dut.clk, 4500)
 
-    assert flash_mem.get(0x0020) == 0x1235, f"ISZ mismatch: {hex(flash_mem.get(0x0020, 0))}"
-    assert flash_mem.get(0x0022) == 0x0000, f"DSZ mismatch: {hex(flash_mem.get(0x0022, 1))}"
     assert ram_mem.get(0x4010) == 0xABCD, f"PSRAM writeback mismatch: {hex(ram_mem.get(0x4010, 0))}"
 
     fetched_addrs = [addr for (op, is_flash, addr) in access_log if op == 'READ' and is_flash]
-    assert 5 not in fetched_addrs, "PC=5 was fetched despite DSZ skip!"
-    assert 7 not in fetched_addrs, "PC=7 was fetched despite JSR jump target PC=8!"
+    assert 4 not in fetched_addrs, "PC=4 was fetched despite JSR jump target PC=6!"
+    assert 5 not in fetched_addrs, "PC=5 was fetched despite JSR jump target PC=6!"
+    assert 6 in fetched_addrs, "PC=6 was reached."
+    assert 7 in fetched_addrs, "PC=7 was reached."
     assert 8 in fetched_addrs, "PC=8 (HALT) was reached."
 
 # test 3: continuous back-to-back burst throughput & full 8-bit byte range
@@ -379,36 +404,46 @@ async def test_uart_psram_buffering(dut):
     # 1: JMP 0
     # 2: DIA AC0, 010               ; read char
     # 3: STA AC0, @0x40             ; store char at PSRAM[0x0040]
-    # 4: ISZ 0x40                   ; advance write pointer
-    # 5: LDA AC1, 0x42              ; load newline char
-    # 6: SUB# AC0, AC1, SZR         ; compare char with '\n', skip if equal
-    # 7: JMP 0                      ; continue ingesting
+    # 4: LDA AC1, 0x40              ; load write pointer
+    # 5: INC AC1, AC1 (c=0)         ; increment pointer
+    # 6: STA AC1, 0x40              ; store updated write pointer
+    # 7: LDA AC1, 0x42              ; load newline char
+    # 8: SUB# AC0, AC1, SZR         ; compare char with '\n', skip if equal
+    # 9: JMP 0                      ; continue ingesting
     #
     # phase 2: transmit buffered characters from PSRAM out to UART
-    # 8: LDA AC0, @0x41             ; read char from PSRAM[0x0041]
-    # 9: ISZ 0x41                   ; advance read pointer
-    # 10: SKPBZ 011                 ; wait for TX ready
-    # 11: JMP 10
-    # 12: DOA AC0, 011              ; transmit char
-    # 13: SUB# AC0, AC1, SZR        ; was this the newline char?
-    # 14: JMP 8                     ; if not, transmit next char
-    # 15: HALT                      ; finished playback
-    flash_mem[0]  = encode_io(ac=0, transfer=7, control=2, dev=0o10)           # SKPDN 010
-    flash_mem[1]  = encode_mem(mode=0, func_or_ac=0, disp=0)                   # JMP 0
-    flash_mem[2]  = encode_io(ac=0, transfer=1, control=0, dev=0o10)           # DIA AC0, 010
+    # 10: LDA AC0, @0x41            ; read char from PSRAM[0x0041]
+    # 11: LDA AC1, 0x41             ; load read pointer
+    # 12: INC AC1, AC1 (c=0)        ; increment read pointer
+    # 13: STA AC1, 0x41             ; store updated read pointer
+    # 14: SKPBZ 011                 ; wait for TX ready
+    # 15: JMP 14
+    # 16: DOA AC0, 011              ; transmit char
+    # 17: LDA AC1, 0x42             ; load '\n'
+    # 18: SUB# AC0, AC1, SZR        ; was this the newline char?
+    # 19: JMP 10                    ; if not, transmit next char
+    # 20: HALT                      ; finished playback
+    flash_mem[0]  = encode_io(ac=0, transfer=7, control=2, dev=0o10)             # SKPDN 010
+    flash_mem[1]  = encode_mem(mode=0, func_or_ac=0, disp=0)                     # JMP 0
+    flash_mem[2]  = encode_io(ac=0, transfer=1, control=0, dev=0o10)             # DIA AC0, 010
     flash_mem[3]  = encode_mem(mode=2, func_or_ac=0, indir=1, index=0, disp=0x40) # STA AC0, @0x40
-    flash_mem[4]  = encode_mem(mode=0, func_or_ac=2, indir=0, index=0, disp=0x40) # ISZ 0x40
-    flash_mem[5]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x42) # LDA AC1, 0x42 ('\n')
-    flash_mem[6]  = encode_alc(acs=0, acd=1, op=5, carry=2, no_load=1, skip=4) # SUB#O SZR (skip on equal)
-    flash_mem[7]  = encode_mem(mode=0, func_or_ac=0, disp=0)                   # JMP 0
-    flash_mem[8]  = encode_mem(mode=1, func_or_ac=0, indir=1, index=0, disp=0x41) # LDA AC0, @0x41
-    flash_mem[9]  = encode_mem(mode=0, func_or_ac=2, indir=0, index=0, disp=0x41) # ISZ 0x41
-    flash_mem[10] = encode_io(ac=0, transfer=7, control=1, dev=0o11)           # SKPBZ 011
-    flash_mem[11] = encode_mem(mode=0, func_or_ac=0, disp=10)                  # JMP 10
-    flash_mem[12] = encode_io(ac=0, transfer=2, control=0, dev=0o11)           # DOA AC0, 011
-    flash_mem[13] = encode_alc(acs=0, acd=1, op=5, carry=2, no_load=1, skip=4) # SUB#O SZR
-    flash_mem[14] = encode_mem(mode=0, func_or_ac=0, disp=8)                   # JMP 8
-    flash_mem[15] = encode_io(ac=0, transfer=6, control=0, dev=0o77)           # HALT
+    flash_mem[4]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x40) # LDA AC1, 0x40
+    flash_mem[5]  = encode_alc(acs=1, acd=1, op=3, carry=1)                       # INC AC1, AC1 (c=0)
+    flash_mem[6]  = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x40) # STA AC1, 0x40
+    flash_mem[7]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x42) # LDA AC1, 0x42 ('\n')
+    flash_mem[8]  = encode_alc(acs=0, acd=1, op=5, carry=2, no_load=1, skip=4)   # SUB#O SZR (skip on equal)
+    flash_mem[9]  = encode_mem(mode=0, func_or_ac=0, disp=0)                     # JMP 0
+    flash_mem[10] = encode_mem(mode=1, func_or_ac=0, indir=1, index=0, disp=0x41) # LDA AC0, @0x41
+    flash_mem[11] = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x41) # LDA AC1, 0x41
+    flash_mem[12] = encode_alc(acs=1, acd=1, op=3, carry=1)                       # INC AC1, AC1 (c=0)
+    flash_mem[13] = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x41) # STA AC1, 0x41
+    flash_mem[14] = encode_io(ac=0, transfer=7, control=1, dev=0o11)             # SKPBZ 011
+    flash_mem[15] = encode_mem(mode=0, func_or_ac=0, disp=14)                    # JMP 14
+    flash_mem[16] = encode_io(ac=0, transfer=2, control=0, dev=0o11)             # DOA AC0, 011
+    flash_mem[17] = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x42) # LDA AC1, 0x42 ('\n')
+    flash_mem[18] = encode_alc(acs=0, acd=1, op=5, carry=2, no_load=1, skip=4)   # SUB#O SZR
+    flash_mem[19] = encode_mem(mode=0, func_or_ac=0, disp=10)                    # JMP 10
+    flash_mem[20] = encode_io(ac=0, transfer=6, control=0, dev=0o77)             # HALT
 
     dut.ena.value = 1
     dut.ui_in.value = 1
@@ -499,61 +534,92 @@ async def test_psram_fibonacci_stream(dut):
     cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem, access_log))
 
     # page 0 variables:
-    flash_mem[0x0040] = 0x4000      # PSRAM base pointer
+    flash_mem[0x0040] = 0x4000      # PSRAM working pointer
     flash_mem[0x0041] = 0x0030      # ASCII '0' base offset (0x30)
-    flash_mem[0x0042] = 0x0006      # loop counter for 6 additions
-    flash_mem[0x0043] = 0x0008      # print count (8 numbers)
+    flash_mem[0x0042] = 0xFFFF      # -1 for decrement
+    flash_mem[0x0043] = 0x0006      # compute count (6 additions)
+    flash_mem[0x0044] = 0x0008      # print count (8 numbers)
+    flash_mem[0x0045] = 0x0000      # temp storage
+    flash_mem[0x0046] = 0x4000      # base pointer (0x4000)
 
     # initial values in PSRAM:
     ram_mem[0x4000] = 0             # F(0) = 0
     ram_mem[0x4001] = 1             # F(1) = 1
 
     # program:
-    # 0: LDA AC2, 0x40              ; AC2 = 0x4000 (pointer)
+    # 0:  LDA AC0, 0x40             ; AC0 = ptr
+    # 1:  LDA AC1, 0,0              ; AC1 = PSRAM[ptr] (F_n-2)
+    # 2:  STA AC1, 0x45             ; temp = F_n-2
+    # 3:  LDA AC1, 1,0              ; AC1 = PSRAM[ptr+1] (F_n-1)
+    # 4:  LDA AC0, 0x45             ; AC0 = F_n-2
+    # 5:  ADD AC0, AC1              ; AC1 = F_n-2 + F_n-1
+    # 6:  LDA AC0, 0x40             ; AC0 = ptr
+    # 7:  STA AC1, 2,0              ; PSRAM[ptr+2] = F_n
+    # 8:  INC AC0, AC0 (c=0)        ; ptr++
+    # 9:  STA AC0, 0x40             ; save ptr
+    # 10: LDA AC0, 0x42             ; AC0 = -1
+    # 11: LDA AC1, 0x43             ; AC1 = count
+    # 12: ADD AC0, AC1              ; AC1 = count - 1
+    # 13: STA AC1, 0x43             ; save count
+    # 14: MOV# AC1, AC1, SZR        ; if count == 0, skip to print
+    # 15: JMP 0                     ; loop back
     #
-    # LOOP (calculate next Fibonacci in PSRAM):
-    # 1: LDA AC0, 0,2               ; AC0 = PSRAM[AC2] (F_n-2)
-    # 2: LDA AC1, 1,2               ; AC1 = PSRAM[AC2+1] (F_n-1)
-    # 3: ADD AC0, AC1               ; AC1 = F_n-2 + F_n-1 (F_n)
-    # 4: STA AC1, 2,2               ; PSRAM[AC2+2] = F_n
-    # 5: INC AC2, AC2 (c=Z)         ; advance pointer AC2
-    # 6: DSZ 0x42                   ; decrement loop counter, skip if 0
-    # 7: JMP 1                      ; loop back
-    #
-    # PRINT LOOP (stream F(0)..F(7) to UART as ASCII digits):
-    # 8: LDA AC2, 0x40              ; reset AC2 to 0x4000
-    # 9: LDA AC3, 0x41              ; AC3 = '0' (0x30)
-    # 10: LDA AC1, 0,2              ; AC1 = PSRAM[AC2]
-    # 11: ADD AC3, AC1              ; convert to ASCII: AC1 = AC1 + '0'
-    # 12: SKPBZ 011                 ; wait for UART TX ready
-    # 13: JMP 12
-    # 14: DOA AC1, 011              ; transmit ASCII character
-    # 15: INC AC2, AC2 (c=Z)        ; advance pointer
-    # 16: DSZ 0x43                  ; decrement print count (8)
-    # 17: JMP 10                    ; loop
-    # 18: HALT
+    # PRINT:
+    # 16: LDA AC0, 0x46             ; AC0 = 0x4000
+    # 17: STA AC0, 0x40             ; reset ptr to 0x4000
+    # 18: LDA AC0, 0x40             ; AC0 = ptr
+    # 19: LDA AC1, 0,0              ; AC1 = PSRAM[ptr]
+    # 20: LDA AC0, 0x41             ; AC0 = '0' (0x30)
+    # 21: ADD AC0, AC1              ; AC1 = digit + '0'
+    # 22: SKPBZ 011                 ; wait for TX ready
+    # 23: JMP 22
+    # 24: DOA AC1, 011              ; transmit char
+    # 25: LDA AC0, 0x40             ; AC0 = ptr
+    # 26: INC AC0, AC0 (c=0)        ; ptr++
+    # 27: STA AC0, 0x40             ; save ptr
+    # 28: LDA AC0, 0x42             ; AC0 = -1
+    # 29: LDA AC1, 0x44             ; AC1 = print count
+    # 30: ADD AC0, AC1              ; AC1 = count - 1
+    # 31: STA AC1, 0x44             ; save print count
+    # 32: MOV# AC1, AC1, SZR        ; if count == 0, skip
+    # 33: JMP 18                    ; loop back
+    # 34: HALT
+    flash_mem[0]  = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x40) # LDA AC0, 0x40
+    flash_mem[1]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=0)    # LDA AC1, 0,0
+    flash_mem[2]  = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x45) # STA AC1, 0x45
+    flash_mem[3]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=1)    # LDA AC1, 1,0
+    flash_mem[4]  = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x45) # LDA AC0, 0x45
+    flash_mem[5]  = encode_alc(acs=0, acd=1, op=6, carry=1)                       # ADDZ AC0, AC1 (c=0)
+    flash_mem[6]  = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x40) # LDA AC0, 0x40
+    flash_mem[7]  = encode_mem(mode=2, func_or_ac=1, indir=0, index=2, disp=2)    # STA AC1, 2,0
+    flash_mem[8]  = encode_alc(acs=0, acd=0, op=3, carry=1)                       # INC AC0, AC0 (c=0)
+    flash_mem[9]  = encode_mem(mode=2, func_or_ac=0, indir=0, index=0, disp=0x40) # STA AC0, 0x40
+    flash_mem[10] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x42) # LDA AC0, 0x42
+    flash_mem[11] = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x43) # LDA AC1, 0x43
+    flash_mem[12] = encode_alc(acs=0, acd=1, op=6, carry=1)                       # ADDZ AC0, AC1 (c=0)
+    flash_mem[13] = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x43) # STA AC1, 0x43
+    flash_mem[14] = encode_alc(acs=1, acd=1, op=2, no_load=1, skip=4)             # MOV# AC1, AC1 SZR
+    flash_mem[15] = encode_mem(mode=0, func_or_ac=0, disp=0)                      # JMP 0
 
-    flash_mem[0]  = encode_mem(mode=1, func_or_ac=2, indir=0, index=0, disp=0x40) # LDA AC2, 0x40
-    flash_mem[1]  = encode_mem(mode=1, func_or_ac=0, indir=0, index=2, disp=0)    # LDA AC0, 0,2
-    flash_mem[2]  = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=1)    # LDA AC1, 1,2
-    flash_mem[3]  = encode_alc(acs=0, acd=1, op=6)                                # ADD AC0, AC1
-    flash_mem[4]  = encode_mem(mode=2, func_or_ac=1, indir=0, index=2, disp=2)    # STA AC1, 2,2
-    flash_mem[5]  = encode_alc(acs=2, acd=2, op=3, carry=1)                       # INC AC2, AC2 (c=0)
-    flash_mem[6]  = encode_mem(mode=0, func_or_ac=3, indir=0, index=0, disp=0x42) # DSZ 0x42
-    flash_mem[7]  = encode_mem(mode=0, func_or_ac=0, disp=1)                      # JMP 1
-    
-    # print:
-    flash_mem[8]  = encode_mem(mode=1, func_or_ac=2, indir=0, index=0, disp=0x40) # LDA AC2, 0x40
-    flash_mem[9]  = encode_mem(mode=1, func_or_ac=3, indir=0, index=0, disp=0x41) # LDA AC3, 0x41 ('0')
-    flash_mem[10] = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=0)    # LDA AC1, 0,2
-    flash_mem[11] = encode_alc(acs=3, acd=1, op=6)                                # ADD AC3, AC1
-    flash_mem[12] = encode_io(ac=0, transfer=7, control=1, dev=0o11)              # SKPBZ 011
-    flash_mem[13] = encode_mem(mode=0, func_or_ac=0, disp=12)                     # JMP 12
-    flash_mem[14] = encode_io(ac=1, transfer=2, control=0, dev=0o11)              # DOA AC1, 011
-    flash_mem[15] = encode_alc(acs=2, acd=2, op=3, carry=1)                       # INC AC2, AC2 (c=0)
-    flash_mem[16] = encode_mem(mode=0, func_or_ac=3, indir=0, index=0, disp=0x43) # DSZ 0x43
-    flash_mem[17] = encode_mem(mode=0, func_or_ac=0, disp=10)                     # JMP 10
-    flash_mem[18] = encode_io(ac=0, transfer=6, control=0, dev=0o77)              # HALT
+    flash_mem[16] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x46) # LDA AC0, 0x46
+    flash_mem[17] = encode_mem(mode=2, func_or_ac=0, indir=0, index=0, disp=0x40) # STA AC0, 0x40
+    flash_mem[18] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x40) # LDA AC0, 0x40
+    flash_mem[19] = encode_mem(mode=1, func_or_ac=1, indir=0, index=2, disp=0)    # LDA AC1, 0,0
+    flash_mem[20] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x41) # LDA AC0, 0x41 ('0')
+    flash_mem[21] = encode_alc(acs=0, acd=1, op=6, carry=1)                       # ADDZ AC0, AC1 (c=0)
+    flash_mem[22] = encode_io(ac=0, transfer=7, control=1, dev=0o11)              # SKPBZ 011
+    flash_mem[23] = encode_mem(mode=0, func_or_ac=0, disp=22)                     # JMP 22
+    flash_mem[24] = encode_io(ac=1, transfer=2, control=0, dev=0o11)              # DOA AC1, 011
+    flash_mem[25] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x40) # LDA AC0, 0x40
+    flash_mem[26] = encode_alc(acs=0, acd=0, op=3, carry=1)                       # INC AC0, AC0 (c=0)
+    flash_mem[27] = encode_mem(mode=2, func_or_ac=0, indir=0, index=0, disp=0x40) # STA AC0, 0x40
+    flash_mem[28] = encode_mem(mode=1, func_or_ac=0, indir=0, index=0, disp=0x42) # LDA AC0, 0x42
+    flash_mem[29] = encode_mem(mode=1, func_or_ac=1, indir=0, index=0, disp=0x44) # LDA AC1, 0x44
+    flash_mem[30] = encode_alc(acs=0, acd=1, op=6, carry=1)                       # ADDZ AC0, AC1 (c=0)
+    flash_mem[31] = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x44) # STA AC1, 0x44
+    flash_mem[32] = encode_alc(acs=1, acd=1, op=2, no_load=1, skip=4)             # MOV# AC1, AC1 SZR
+    flash_mem[33] = encode_mem(mode=0, func_or_ac=0, disp=18)                     # JMP 18
+    flash_mem[34] = encode_io(ac=0, transfer=6, control=0, dev=0o77)              # HALT
 
     dut.ena.value = 1
     dut.ui_in.value = 1
@@ -713,7 +779,7 @@ async def test_alc_skip_matrix(dut):
 @cocotb.test()
 async def test_jsr_return_and_indirect_jmp(dut):
     """
-    test 9: verifies that JSR writes pc+1 into AC3 as the return address, and
+    test 9: verifies that JSR writes pc+1 into AC1 as the return address, and
     that an indirect JMP correctly dereferences the pointer and jumps through it
     """
     clock = Clock(dut.clk, 100, unit="ns")
@@ -725,10 +791,10 @@ async def test_jsr_return_and_indirect_jmp(dut):
     cocotb.start_soon(spi_memory_responder(dut, flash_mem, ram_mem, access_log))
 
     # test sequence:
-    # 0: JSR 0x10  (jump to 0x10, stores return addr 1 in AC3)
+    # 0: JSR 0x10  (jump to 0x10, stores return addr 1 in AC1)
     # 1: HALT      (should be reached via return)
     # ...
-    # 0x10: STA AC3, 0x20    (store return address into page-zero pointer at 0x20)
+    # 0x10: STA AC1, 0x20    (store return address into page-zero pointer at 0x20)
     # 0x11: JMP @0x20        (indirect JMP through pointer -> should land at 1)     ┌(@0x20)┘ JUMP!
     #
     # page-zero pointer slot:
@@ -736,7 +802,7 @@ async def test_jsr_return_and_indirect_jmp(dut):
 
     flash_mem[0x00]  = encode_mem(mode=0, func_or_ac=1, indir=0, index=0, disp=0x10)  # JSR 0x10
     flash_mem[0x01]  = encode_io(ac=0, transfer=6, control=0, dev=0o77)               # HALT
-    flash_mem[0x10]  = encode_mem(mode=2, func_or_ac=3, indir=0, index=0, disp=0x20)  # STA AC3, 0x20
+    flash_mem[0x10]  = encode_mem(mode=2, func_or_ac=1, indir=0, index=0, disp=0x20)  # STA AC1, 0x20
     flash_mem[0x11]  = encode_mem(mode=0, func_or_ac=0, indir=1, index=0, disp=0x20)  # JMP @0x20
 
     dut.ena.value = 1

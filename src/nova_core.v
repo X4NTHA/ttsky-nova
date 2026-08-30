@@ -25,18 +25,16 @@ module nova_core (
     output wire        spi_cs1_n
 );
 
-    // architectural registers/state
-    reg [15:0] ac0, ac1, ac2, ac3;
+    // architectural registers (2 accumulators: ac0, ac1) (RIP ac2, ac3)
+    reg [15:0] ac0, ac1;
     reg [14:0] pc;
     reg [15:0] ir;
     reg        carry_flag;
     reg        carry_intermediate;
     reg [14:0] ea;
 
-    // helper mux for selected destination accumulator
-    wire [15:0] ac_dst_val = (ir[4:3] == 2'b00) ? ac0 :
-                             (ir[4:3] == 2'b01) ? ac1 :
-                             (ir[4:3] == 2'b10) ? ac2 : ac3;
+    // destination accumulator value selected by ir[3] (0=ac0, 1=ac1)
+    wire [15:0] ac_dst_val = ir[3] ? ac1 : ac0;
 
     // peripheral control signals
     reg        tx_start_req;
@@ -54,8 +52,7 @@ module nova_core (
     // memory interface (nova_meow)
     wire [14:0] mem_addr = (state == 3'd0 || state == 3'd1) ? pc : ea;
     wire [15:0] mem_data_in;
-    wire [15:0] isz_dsz_val = mem_data_in + (ir[4:3] == 2'b10 ? 16'd1 : 16'hFFFF);
-    wire [15:0] mem_data_out = (ir[2:1] == 2'b10) ? ac_dst_val : isz_dsz_val;
+    wire [15:0] mem_data_out = ac_dst_val;
     reg         mem_read_req;
     reg         mem_write_req;
     wire        meow_busy;
@@ -82,21 +79,9 @@ module nova_core (
     wire [3:0] alu_result;
     wire       alu_carry_out;
 
-    // continuous combinational routing of LSB nibbles for serial loop
-    // accumulators rotate right by 4 bits each cycle; LSB is always presented to ALU
     always @(*) begin
-        case (ir[2:1]) // ACS (source accumulator)
-            2'b00: alu_in_a = ac0[3:0];
-            2'b01: alu_in_a = ac1[3:0];
-            2'b10: alu_in_a = ac2[3:0];
-            2'b11: alu_in_a = ac3[3:0];
-        endcase
-        case (ir[4:3]) // ACD (destination accumulator)
-            2'b00: alu_in_b = ac0[3:0];
-            2'b01: alu_in_b = ac1[3:0];
-            2'b10: alu_in_b = ac2[3:0];
-            2'b11: alu_in_b = ac3[3:0];
-        endcase
+        alu_in_a = ir[1] ? ac1[3:0] : ac0[3:0];
+        alu_in_b = ir[3] ? ac1[3:0] : ac0[3:0];
     end
 
     nova_alu alu_inst (
@@ -133,7 +118,7 @@ module nova_core (
             rx_shift_reg <= 8'd0;
             rx_done_flag <= 1'b0;
         end else begin
-            // 2-stage input synchronizer to eliminate metastability
+            // 2-stage input synchronizer
             rx_sync <= {rx_sync[0], uart_rx};
 
             // clear rx_done_flag if CPU reads DIA (Dev 0o10) or issues CLR pulse
@@ -176,7 +161,7 @@ module nova_core (
         end
     end
 
-    // UART TX: 8N1 serial frame transmitter (1 start bit, 8 data bits LSB first, 1 stop bit)
+    // UART TX: 8N1 serial frame transmitter
     localparam TX_IDLE = 1'b0;
     localparam TX_SEND = 1'b1;
 
@@ -244,9 +229,9 @@ module nova_core (
     localparam STATE_HALT          = 3'd7;
 
     // effective address calculation for memory reference class (MRC)
-    // index: 00 = Page 0 (0..255), 01 = PC-relative (+/-128), 10 = AC2-indexed, 11 = AC3-indexed
+    // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
     wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
-                           (ir[7:6] == 2'b10) ? ac2[14:0] : ac3[14:0];
+                           (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
 
     wire [14:0] calculated_ea = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} :
                                                      (rel_base + {{7{ir[15]}}, ir[15:8]});
@@ -324,8 +309,6 @@ module nova_core (
             ir                  <= 16'd0;
             ac0                 <= 16'd0;
             ac1                 <= 16'd0;
-            ac2                 <= 16'd0;
-            ac3                 <= 16'd0;
             carry_flag          <= 1'b0;
             carry_intermediate <= 1'b0;
             ea                  <= 15'd0;
@@ -395,12 +378,10 @@ module nova_core (
                             end else begin
                                 // data transfer (DIA/DOA)
                                 if (ir[7:5] == 3'b001 && is_kbd) begin
-                                    case (ir[4:3])
-                                         2'b00: ac0 <= {8'h00, rx_shift_reg};
-                                         2'b01: ac1 <= {8'h00, rx_shift_reg};
-                                         2'b10: ac2 <= {8'h00, rx_shift_reg};
-                                         2'b11: ac3 <= {8'h00, rx_shift_reg};
-                                    endcase
+                                    if (ir[3])
+                                        ac1 <= {8'h00, rx_shift_reg};
+                                    else
+                                        ac0 <= {8'h00, rx_shift_reg};
                                     io_clear_rx_done <= 1'b1;
                                 end else if (ir[7:5] == 3'b010 && is_prt) begin
                                     tx_start_req <= 1'b1;
@@ -417,16 +398,15 @@ module nova_core (
                             end
                         end
                     end else begin
-                        // memory reference class (MRC)
-                        // ea_valid is set after indirect resolve, skip EA calc and indirect check
+                        // memory reference class (MRC): JMP, JSR, LDA, STA
                         if (!ea_valid) ea <= calculated_ea;
 
                         if (ir[5] && !ea_valid) begin
                             // indirect deferral: fetch pointer word from memory
                             mem_read_req <= 1'b1;
                             state        <= STATE_INDIR_WAIT;
-                        end else if (ir[2:1] == 2'b01 || ir[4]) begin
-                            // LDA / ISZ / DSZ
+                        end else if (ir[2:1] == 2'b01) begin
+                            // LDA
                             mem_read_req <= 1'b1;
                             state        <= STATE_MEM_RD_WAIT;
                         end else if (ir[2:1] == 2'b10) begin
@@ -434,16 +414,15 @@ module nova_core (
                             mem_write_req <= 1'b1;
                             state         <= STATE_MEM_WR_WAIT;
                         end else begin
-                            // JMP / JSR
+                            // JMP / JSR (ir[2:1] == 2'b00)
                             pc    <= ea_valid ? ea : calculated_ea;
-                            if (ir[3]) ac3 <= {1'b0, pc + 15'd1};
+                            if (ir[3]) ac1 <= {1'b0, pc + 15'd1}; // JSR: return addr in ac1
                             state <= STATE_FETCH;
                         end
                     end
                 end
 
                 // ALC 4-cycle execution loop: nibble serial arithmetic
-                // only rotate source and dest ACs, other ACs hold
                 STATE_EXEC_ALU: begin
                     carry_intermediate <= alu_carry_out;
 
@@ -455,22 +434,18 @@ module nova_core (
                         exec_cycle <= exec_cycle + 2'd1;
                     end
 
-                    // dest AC: receives ALU result/shifted writeback
-                    case (ir[4:3])
-                        2'b00: ac0 <= next_dest_ac;
-                        2'b01: ac1 <= next_dest_ac;
-                        2'b10: ac2 <= next_dest_ac;
-                        2'b11: ac3 <= next_dest_ac;
-                    endcase
+                    // dest AC: receives ALU result writeback
+                    if (ir[3])
+                        ac1 <= next_dest_ac;
+                    else
+                        ac0 <= next_dest_ac;
 
                     // source AC: rotate to present next nibble (skip if same as dest)
-                    if (ir[2:1] != ir[4:3]) begin
-                        case (ir[2:1])
-                            2'b00: ac0 <= {ac0[3:0], ac0[15:4]};
-                            2'b01: ac1 <= {ac1[3:0], ac1[15:4]};
-                            2'b10: ac2 <= {ac2[3:0], ac2[15:4]};
-                            2'b11: ac3 <= {ac3[3:0], ac3[15:4]};
-                        endcase
+                    if (ir[1] != ir[3]) begin
+                        if (ir[1])
+                            ac1 <= {ac1[3:0], ac1[15:4]};
+                        else
+                            ac0 <= {ac0[3:0], ac0[15:4]};
                     end
                 end
 
@@ -484,41 +459,25 @@ module nova_core (
                     end
                 end
 
-                // memory read (LDA / ISZ / DSZ)
+                // memory read (LDA only) (RIP ISZ/DSZ)
                 STATE_MEM_RD_WAIT: begin
                     mem_read_req <= 1'b0;
                     if (!meow_busy) begin
-                        if (ir[2:1] == 2'b01) begin
-                            // LDA: load memory word into destination accumulator
-                            case (ir[4:3])
-                                2'b00: ac0 <= mem_data_in;
-                                2'b01: ac1 <= mem_data_in;
-                                2'b10: ac2 <= mem_data_in;
-                                2'b11: ac3 <= mem_data_in;
-                            endcase
-                            pc    <= pc + 15'd1;
-                            state <= STATE_FETCH;
-                        end else if (ir[4:3] == 2'b10 || ir[4:3] == 2'b11) begin
-                            // ISZ / DSZ: write modified word back to memory
-                            mem_write_req <= 1'b1;
-                            state         <= STATE_MEM_WR_WAIT;
-                        end
+                        if (ir[3])
+                            ac1 <= mem_data_in;
+                        else
+                            ac0 <= mem_data_in;
+                        pc    <= pc + 15'd1;
+                        state <= STATE_FETCH;
                     end
                 end
 
-                // memory write (STA / ISZ / DSZ)
+                // memory write (STA only)
                 STATE_MEM_WR_WAIT: begin
                     mem_write_req <= 1'b0;
                     if (!meow_busy) begin
-                        if (ir[2:1] == 2'b10) begin
-                            // STA: write completed
-                            pc    <= pc + 15'd1;
-                            state <= STATE_FETCH;
-                        end else if (ir[4:3] == 2'b10 || ir[4:3] == 2'b11) begin
-                            // ISZ / DSZ: skip next word if modified result is zero
-                            pc    <= (isz_dsz_val == 16'h0000) ? (pc + 15'd2) : (pc + 15'd1);
-                            state <= STATE_FETCH;
-                        end
+                        pc    <= pc + 15'd1;
+                        state <= STATE_FETCH;
                     end
                 end
 
@@ -536,5 +495,7 @@ module nova_core (
     assign blinkenlights[2:0] = state[2:0];
     assign blinkenlights[5:3] = ir[3:1];
     assign blinkenlights[6]   = (state == STATE_HALT);
+
+    wire _unused_ir_bits = &{ir[4], ir[2]};
 
 endmodule
