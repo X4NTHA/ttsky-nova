@@ -34,7 +34,6 @@ module nova_meow (
     reg [1:0]  phase;       // 0 = CMD+UpperAddr, 1 = Address, 2 = Data
     reg [3:0]  bit_idx;     // 4-bit nibble/word bit index (15 down to 0)
     reg [15:0] shift_reg;   // unified 16-bit shift transceiver for MOSI & MISO
-    reg        is_write;
 
     assign data_out = shift_reg;
     assign busy = (state != S_IDLE) || read_req || write_req;
@@ -52,13 +51,11 @@ module nova_meow (
             state     <= S_IDLE;
             phase     <= 2'd0;
             bit_idx   <= 4'd0;
-            is_write  <= 1'b0;
         end else begin
             case (state)
                 S_IDLE: begin
                     spi_sck <= 1'b0;
                     if (read_req || write_req) begin
-                        is_write  <= write_req;
                         phase     <= 2'd0;
                         bit_idx   <= 4'd15;
                         // Phase 0: 8-bit command (0x02 write, 0x03 read) + 8-bit 0x00 upper address
