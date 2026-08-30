@@ -102,17 +102,15 @@ module nova_core (
     reg [1:0] rx_sync;
     wire      rx_pin = rx_sync[1];
 
-    reg       rx_active;
     reg [6:0] rx_baud_cnt;
     reg [3:0] rx_bit_cnt;
     reg [7:0] rx_shift_reg;
     reg       rx_done_flag;
-    wire      rx_busy = rx_active;
+    wire      rx_busy = (rx_bit_cnt != 4'd0);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rx_sync      <= 2'b11;
-            rx_active    <= 1'b0;
             rx_baud_cnt  <= 7'd0;
             rx_bit_cnt   <= 4'd0;
             rx_shift_reg <= 8'd0;
@@ -126,35 +124,33 @@ module nova_core (
                 rx_done_flag <= 1'b0;
             end
 
-            if (!rx_active) begin
+            if (rx_bit_cnt == 4'd0) begin
                 rx_baud_cnt <= 7'd0;
-                rx_bit_cnt  <= 4'd0;
                 if (rx_pin == 1'b0) begin
-                    rx_active <= 1'b1;
+                    rx_bit_cnt <= 4'd1;
                 end
             end else begin
                 // baud counter
                 if (rx_baud_cnt == BAUD_DIV - 7'd1) begin
                     rx_baud_cnt <= 7'd0;
-                    rx_bit_cnt  <= rx_bit_cnt + 4'd1;
+                    rx_bit_cnt  <= (rx_bit_cnt == 4'd10) ? 4'd0 : (rx_bit_cnt + 4'd1);
                 end else begin
                     rx_baud_cnt <= rx_baud_cnt + 7'd1;
                 end
 
                 // mid-bit sampling
                 if (rx_baud_cnt == HALF_BAUD) begin
-                    if (rx_bit_cnt == 4'd0) begin
+                    if (rx_bit_cnt == 4'd1) begin
                         // validate start bit (reject sub-half-baud glitches)
                         if (rx_pin == 1'b1) begin
-                            rx_active <= 1'b0;
+                            rx_bit_cnt <= 4'd0;
                         end
-                    end else if (rx_bit_cnt >= 4'd1 && rx_bit_cnt <= 4'd8) begin
+                    end else if (rx_bit_cnt >= 4'd2 && rx_bit_cnt <= 4'd9) begin
                         // sample 8 data bits LSB first
                         rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
-                    end else if (rx_bit_cnt == 4'd9) begin
-                        // stop bit verification & latching
+                    end else if (rx_bit_cnt == 4'd10) begin
+                        // stop bit reached
                         rx_done_flag <= 1'b1;
-                        rx_active    <= 1'b0;
                     end
                 end
             end
