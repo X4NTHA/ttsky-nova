@@ -53,18 +53,18 @@ module nova_core (
     reg        ea_valid;
 
     // pre-decoded I/O device fields (shared comparators)
-    wire is_kbd = (ir[15:10] == 6'o10);
-    wire is_prt = (ir[15:10] == 6'o11);
-    wire is_cpu = (ir[15:10] == 6'o77);
+    wire dev_is_ser = (ir[15:11] == 5'b00100);
+    wire is_kbd     = dev_is_ser && !ir[10];
+    wire is_prt     = dev_is_ser &&  ir[10];
+    wire is_cpu     = (ir[15:10] == 6'o77);
 
     // effective address calculation for memory reference class (MRC)
     // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
     wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
                            (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
 
-    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
-    wire [6:0]  offset_hi = (ir[7:6] == 2'b00) ? 7'b0 : {7{ir[15]}};
-    wire [14:0] calculated_ea = base_addr + {offset_hi, ir[15:8]};
+    wire [14:0] rel_addr      = rel_base + {{7{ir[15]}}, ir[15:8]};
+    wire [14:0] calculated_ea = (ir[7:6] == 2'b00) ? {7'd0, ir[15:8]} : rel_addr;
 
     // memory interface (nova_meow)
     wire [14:0] active_ea = ea_valid ? ea : calculated_ea;
