@@ -161,22 +161,17 @@ module nova_core (
         end
     end
 
-    // UART TX: 8N1 serial frame transmitter
-    localparam TX_IDLE = 1'b0;
-    localparam TX_SEND = 1'b1;
-
-    reg       tx_state;
+    // UART TX: 8N1 serial frame transmitter (streamlined counter, no redundant state register)
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
     reg [9:0] tx_shift_reg;
     reg       tx_done_flag;
 
-    wire tx_busy = (tx_state != TX_IDLE);
-    assign uart_tx = (tx_state == TX_SEND) ? tx_shift_reg[0] : 1'b1;
+    wire tx_busy = (tx_bit_cnt != 4'd0);
+    assign uart_tx = tx_busy ? tx_shift_reg[0] : 1'b1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            tx_state     <= TX_IDLE;
             tx_baud_cnt  <= 7'd0;
             tx_bit_cnt   <= 4'd0;
             tx_shift_reg <= 10'h3FF;
@@ -187,34 +182,27 @@ module nova_core (
                 tx_done_flag <= 1'b0;
             end
 
-            case (tx_state)
-                TX_IDLE: begin
-                    if (tx_start_req) begin
-                        // frame: stop(1) + data(8) + start(0)
-                        tx_shift_reg <= {1'b1, ac_dst_val[7:0], 1'b0};
-                        tx_baud_cnt  <= 7'd0;
-                        tx_bit_cnt   <= 4'd10;
-                        tx_done_flag <= 1'b0;
-                        tx_state     <= TX_SEND;
-                    end
+            if (tx_bit_cnt == 4'd0) begin
+                if (tx_start_req) begin
+                    tx_shift_reg <= {1'b1, ac_dst_val[7:0], 1'b0};
+                    tx_baud_cnt  <= 7'd0;
+                    tx_bit_cnt   <= 4'd10;
+                    tx_done_flag <= 1'b0;
                 end
-
-                // shift out bits at 115200 baud intervals
-                TX_SEND: begin
-                    if (tx_baud_cnt == BAUD_DIV - 7'd1) begin
-                        tx_baud_cnt <= 7'd0;
-                        if (tx_bit_cnt == 4'd1) begin
-                            tx_done_flag <= 1'b1;
-                            tx_state     <= TX_IDLE;
-                        end else begin
-                            tx_shift_reg <= {1'b1, tx_shift_reg[9:1]};
-                            tx_bit_cnt   <= tx_bit_cnt - 4'd1;
-                        end
+            end else begin
+                if (tx_baud_cnt == BAUD_DIV - 7'd1) begin
+                    tx_baud_cnt <= 7'd0;
+                    if (tx_bit_cnt == 4'd1) begin
+                        tx_done_flag <= 1'b1;
+                        tx_bit_cnt   <= 4'd0;
                     end else begin
-                        tx_baud_cnt <= tx_baud_cnt + 7'd1;
+                        tx_shift_reg <= {1'b1, tx_shift_reg[9:1]};
+                        tx_bit_cnt   <= tx_bit_cnt - 4'd1;
                     end
+                end else begin
+                    tx_baud_cnt <= tx_baud_cnt + 7'd1;
                 end
-            endcase
+            end
         end
     end
 
@@ -233,36 +221,26 @@ module nova_core (
     wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
                            (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
 
-    wire [14:0] calculated_ea = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} :
-                                                     (rel_base + {{7{ir[15]}}, ir[15:8]});
+    wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
+    wire [14:0] offset    = (ir[7:6] == 2'b00) ? {7'b0, ir[15:8]} : {{7{ir[15]}}, ir[15:8]};
+    wire [14:0] calculated_ea = base_addr + offset;
 
     // ALC shifter logic (applied on cycle 3 once full 16-bit word is reassembled)
     wire [15:0] raw_res_word = {alu_result, ac_dst_val[15:4]};
     wire        raw_cout     = alu_carry_out;
 
     reg [15:0] shifted_res;
-    reg        shifted_cout;
-
     always @(*) begin
         case (ir[9:8])
-            2'b00: begin // none
-                shifted_res  = raw_res_word;
-                shifted_cout = raw_cout;
-            end
-            2'b01: begin // rotate left through carry
-                shifted_res  = {raw_res_word[14:0], raw_cout};
-                shifted_cout = raw_res_word[15];
-            end
-            2'b10: begin // rotate right through carry
-                shifted_res  = {raw_cout, raw_res_word[15:1]};
-                shifted_cout = raw_res_word[0];
-            end
-            2'b11: begin // swap upper and lower 8-bit bytes
-                shifted_res  = {raw_res_word[7:0], raw_res_word[15:8]};
-                shifted_cout = raw_cout;
-            end
+            2'b00: shifted_res = raw_res_word;                                // none
+            2'b01: shifted_res = {raw_res_word[14:0], raw_cout};              // rotate left through carry
+            2'b10: shifted_res = {raw_cout, raw_res_word[15:1]};              // rotate right through carry
+            2'b11: shifted_res = {raw_res_word[7:0], raw_res_word[15:8]};    // swap upper and lower 8-bit bytes
         endcase
     end
+
+    wire shifted_cout = (ir[9:8] == 2'b01) ? raw_res_word[15] :
+                        (ir[9:8] == 2'b10) ? raw_res_word[0] : raw_cout;
 
     // ALC destination accumulator writeback value
     wire [15:0] next_dest_ac = (exec_cycle == 2'd3) ?

@@ -45,11 +45,29 @@ module nova_meow (
     assign spi_cs0_n = (cs_active && !cs_select) ? 1'b0 : 1'b1;
     assign spi_cs1_n = (cs_active &&  cs_select) ? 1'b0 : 1'b1;
 
-    // SPI frame: 8-bit command + 24-bit address + 16-bit data = 48 bits
-    // bit_cnt counts down from 47 to 0, selecting directly from tx_word
-    wire [7:0]  spi_cmd  = is_write ? 8'h02 : 8'h03;
-    wire [23:0] byte_adr = {8'h00, addr, 1'b0};
-    wire [47:0] tx_word  = {spi_cmd, byte_adr, data_in};
+    // MOSI output bit generation
+    // frame breakdown:
+    //   bits 47..40: 8-bit command (8'h02 for write, 8'h03 for read)
+    //   bits 39..32: upper 8 address bits (always 8'h00)
+    //   bits 31..16: 16-bit address {addr[14:0], 1'b0}
+    //   bits 15..0 : 16-bit data_in
+    reg mosi_bit;
+    always @(*) begin
+        if (bit_cnt >= 6'd40) begin
+            // command: 8'h02 (00000010) or 8'h03 (00000011)
+            case (bit_cnt[2:0])
+                3'd1:    mosi_bit = 1'b1;
+                3'd0:    mosi_bit = !is_write;
+                default: mosi_bit = 1'b0;
+            endcase
+        end else if (bit_cnt >= 6'd32) begin
+            mosi_bit = 1'b0; // upper 8 address bits are 0x00
+        end else if (bit_cnt >= 6'd16) begin
+            mosi_bit = (bit_cnt == 6'd16) ? 1'b0 : addr[bit_cnt[3:0] - 4'd1];
+        end else begin
+            mosi_bit = data_in[bit_cnt[3:0]];
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -72,10 +90,10 @@ module nova_meow (
                     end
                 end
 
-                // SCK low phase: drive MOSI bit from tx_word
+                // SCK low phase: drive MOSI bit
                 S_CLK_LOW: begin
                     spi_sck  <= 1'b0;
-                    spi_mosi <= tx_word[bit_cnt];
+                    spi_mosi <= mosi_bit;
                     state    <= S_CLK_HIGH;
                 end
 
