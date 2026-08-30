@@ -173,12 +173,12 @@ module nova_core (
                         if (rx_pin == 1'b1) begin
                             rx_bit_cnt <= 4'd0;
                         end
-                    end else if (rx_bit_cnt >= 4'd2 && rx_bit_cnt <= 4'd9) begin
-                        // sample 8 data bits LSB first
-                        rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
                     end else if (rx_bit_cnt == 4'd10) begin
                         // stop bit verif and latching
                         rx_done_flag <= 1'b1;
+                    end else begin
+                        // sample 8 data bits LSB first (bits 2..9)
+                        rx_shift_reg <= {rx_pin, rx_shift_reg[7:1]};
                     end
                 end
             end
