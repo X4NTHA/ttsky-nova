@@ -167,8 +167,8 @@ async def spi_memory_responder(dut, mem_flash, mem_ram, access_log=None):
 
                 target_mem[word_addr] = write_word
 
-# UART helper coroutines (115200 Baud @ 10 MHz, 87 clocks/bit)
-async def uart_tx_byte(dut, byte_val, baud_clocks=87):
+# UART helper coroutines (19200 Baud @ 1.5 MHz, 78 clocks/bit)
+async def uart_tx_byte(dut, byte_val, baud_clocks=78):
     """transmits a byte to dut.ui_in[0] at 8N1."""
     # start bit (0)
     dut.ui_in.value = 0
@@ -182,7 +182,7 @@ async def uart_tx_byte(dut, byte_val, baud_clocks=87):
     dut.ui_in.value = 1
     await ClockCycles(dut.clk, baud_clocks)
 
-async def uart_rx_byte(dut, baud_clocks=87, timeout_cycles=100000):
+async def uart_rx_byte(dut, baud_clocks=78, timeout_cycles=100000):
     """receives a byte from dut.uo_out[0] at 8N1."""
     cycles_waited = 0
     while True:
@@ -214,7 +214,7 @@ async def test_alu_matrix(dut):
     test 1: exhaustive ALU matrix verification covering all operations,
     shifts (None, L, R, Swap), carry initializations, skips, and no-load '#'
     """
-    clock = Clock(dut.clk, 100, unit="ns") # 10 MHz
+    clock = Clock(dut.clk, 666, unit="ns") # 1.5 MHz
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -279,7 +279,7 @@ async def test_memory_reference(dut):
     test 2: comprehensive verification of Page 0, PC-relative (positive & negative),
     AC2/AC3 indexed addressing, indirect defer chains, and PSRAM read-after-write
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -338,7 +338,7 @@ async def test_uart_burst_throughput(dut):
     to verify UART double-buffering, baud timing, and receiver FIFO/flag handshaking
     under saturated serial line conditions
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -386,7 +386,7 @@ async def test_uart_psram_buffering(dut):
     are buffered into PSRAM memory until newline, then the CPU reads the buffered 
     string back from PSRAM and transmits it
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -476,7 +476,7 @@ async def test_uart_glitch_rejection(dut):
     test 5: verifies that short line noise/glitches (< half baud period)
     on the UART RX line are properly rejected by the half-baud center sampler
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -525,7 +525,7 @@ async def test_psram_fibonacci_stream(dut):
     F(2)..F(7) in PSRAM, reads them back, formats each as an ASCII digit ('0'..'9'),
     and transmits the stream "0112358..." over UART
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -647,7 +647,7 @@ async def test_assembler_pipeline_echo(dut):
     SPI Flash memory, executes the live binary on the Nova CPU core, and validates
     interactive UART echo behavior
     """
-    clock = Clock(dut.clk, 100, unit="ns") # 10 MHz
+    clock = Clock(dut.clk, 666, unit="ns") # 1.5 MHz
     cocotb.start_soon(clock.start())
 
     # raw Nova assembly source code:
@@ -700,7 +700,7 @@ async def test_alc_skip_matrix(dut):
     test 8: verifies all 8 ALC skip conditions (never/SKP/SZC/SNC/SZR/SNR/SEZ/SBN)
     and confirms that the no-load '#' modifier preserves the dest accumulator
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -782,7 +782,7 @@ async def test_jsr_return_and_indirect_jmp(dut):
     test 9: verifies that JSR writes pc+1 into AC1 as the return address, and
     that an indirect JMP correctly dereferences the pointer and jumps through it
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}
@@ -833,7 +833,7 @@ async def test_blinkenlights_and_iorst(dut):
     test 10: verifies that uo_out[7:1] reflects the current CPU state
     and instr opcode bits, and that IORST clears the UART done flags
     """
-    clock = Clock(dut.clk, 100, unit="ns")
+    clock = Clock(dut.clk, 666, unit="ns")
     cocotb.start_soon(clock.start())
 
     flash_mem = {}

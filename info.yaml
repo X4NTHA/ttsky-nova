@@ -5,7 +5,7 @@ project:
   discord:      "x4ntha"      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
   description:  "16-bit Data General Nova 1200 CPU (4-bit nibble-serial datapath)"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     10000000    # Clock frequency in Hz (10 MHz for 115200 Baud UART)
+  clock_hz:     1500000    # Clock frequency in Hz (1.5 MHz for 19200 Baud UART)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2

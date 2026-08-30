@@ -117,9 +117,9 @@ module nova_core (
         .carry_out(alu_carry_out)
     );
 
-    // hardware UART (115200 baud @ 10 MHz: 10,000,000 / 115200 = 86.8 -> div 87)
-    localparam BAUD_DIV = 7'd87;
-    localparam HALF_BAUD = 7'd43;
+    // hardware UART (19200 baud @ 1.5 MHz: 1,500,000 / 19200 = 78.125 -> div 78)
+    localparam BAUD_DIV  = 7'd78;
+    localparam HALF_BAUD = 7'd39;
 
     // UART RX: input synchronizer, mid-bit sampling, start-glitch rejection
     reg       rx_sync;
