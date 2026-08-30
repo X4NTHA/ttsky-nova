@@ -19,7 +19,7 @@ module nova_meow (
 
     input  wire        spi_miso,
     output reg         spi_mosi,
-    output wire        spi_sck,
+    output reg         spi_sck,
     output wire        spi_cs0_n,
     output wire        spi_cs1_n
 );
@@ -37,9 +37,6 @@ module nova_meow (
 
     assign data_out = rx_shift;
     assign busy = (state != S_IDLE) || read_req || write_req;
-
-    // SPI serial clock is high only during S_CLK_HIGH (Mode 0)
-    assign spi_sck = (state == S_CLK_HIGH);
 
     // chip selects derived combinationally from addr[14] + transaction active
     // CS stays asserted through S_DONE for proper SPI hold time
@@ -80,6 +77,7 @@ module nova_meow (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            spi_sck   <= 1'b0;
             spi_mosi  <= 1'b0;
             state     <= S_IDLE;
             rx_shift  <= 16'd0;
@@ -88,6 +86,7 @@ module nova_meow (
         end else begin
             case (state)
                 S_IDLE: begin
+                    spi_sck <= 1'b0;
                     if (read_req || write_req) begin
                         is_write <= write_req;
                         bit_cnt  <= 6'd47;
@@ -97,12 +96,14 @@ module nova_meow (
 
                 // SCK low phase: drive MOSI bit
                 S_CLK_LOW: begin
+                    spi_sck  <= 1'b0;
                     spi_mosi <= mosi_bit;
                     state    <= S_CLK_HIGH;
                 end
 
                 // SCK high phase: sample MISO bit on rising edge
                 S_CLK_HIGH: begin
+                    spi_sck <= 1'b1;
                     if (!is_write)
                         rx_shift <= {rx_shift[14:0], spi_miso};
 
@@ -116,7 +117,8 @@ module nova_meow (
 
                 // transaction complete: deassert chip selects via cs_active going low
                 S_DONE: begin
-                    state <= S_IDLE;
+                    spi_sck <= 1'b0;
+                    state   <= S_IDLE;
                 end
             endcase
         end

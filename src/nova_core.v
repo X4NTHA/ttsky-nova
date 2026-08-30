@@ -188,11 +188,21 @@ module nova_core (
     // UART TX: 8N1 serial frame transmitter
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
-    reg [9:0] tx_shift_reg;
+    reg [7:0] tx_data;
     reg       tx_done_flag;
 
-    wire tx_busy   = (tx_bit_cnt != 4'd0);
-    assign uart_tx = tx_shift_reg[0];
+    wire tx_busy = (tx_bit_cnt != 4'd0);
+
+    reg tx_out_bit;
+    always @(*) begin
+        case (tx_bit_cnt)
+            4'd10:   tx_out_bit = 1'b0;                                // START bit
+            4'd1:    tx_out_bit = 1'b1;                                // STOP bit
+            4'd0:    tx_out_bit = 1'b1;                                // IDLE
+            default: tx_out_bit = tx_data[3'(4'd9 - tx_bit_cnt)];     // data bits 0..7
+        endcase
+    end
+    assign uart_tx = tx_out_bit;
 
     wire tx_start_req = is_io_decode && is_prt && (ir[7:5] == 3'b010);
 
@@ -200,7 +210,7 @@ module nova_core (
         if (!rst_n) begin
             tx_baud_cnt  <= 7'd0;
             tx_bit_cnt   <= 4'd0;
-            tx_shift_reg <= 10'h3FF;
+            tx_data      <= 8'd0;
             tx_done_flag <= 1'b0;
         end else begin
             // clear tx_done_flag when CPU writes DOA or issues CLR pulse
@@ -210,7 +220,7 @@ module nova_core (
 
             if (tx_bit_cnt == 4'd0) begin
                 if (tx_start_req) begin
-                    tx_shift_reg <= {1'b1, ac_dst_val[7:0], 1'b0};
+                    tx_data      <= ac_dst_val[7:0];
                     tx_baud_cnt  <= 7'd0;
                     tx_bit_cnt   <= 4'd10;
                     tx_done_flag <= 1'b0;
@@ -222,8 +232,7 @@ module nova_core (
                         tx_done_flag <= 1'b1;
                         tx_bit_cnt   <= 4'd0;
                     end else begin
-                        tx_shift_reg <= {1'b1, tx_shift_reg[9:1]};
-                        tx_bit_cnt   <= tx_bit_cnt - 4'd1;
+                        tx_bit_cnt <= tx_bit_cnt - 4'd1;
                     end
                 end else begin
                     tx_baud_cnt <= tx_baud_cnt + 7'd1;
