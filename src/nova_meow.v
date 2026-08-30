@@ -52,7 +52,6 @@ module nova_meow (
             state     <= S_IDLE;
             phase     <= 2'd0;
             bit_idx   <= 4'd0;
-            shift_reg <= 16'd0;
             is_write  <= 1'b0;
         end else begin
             case (state)

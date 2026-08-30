@@ -59,8 +59,14 @@ module nova_core (
 
     // effective address calculation for memory reference class (MRC)
     // index: 00 = Page 0, 01 = PC-relative, 10 = AC0-indexed, 11 = AC1-indexed
-    wire [14:0] rel_base = (ir[7:6] == 2'b01) ? pc :
-                           (ir[7:6] == 2'b10) ? ac0[14:0] : ac1[14:0];
+    reg [14:0] rel_base;
+    always @(*) begin
+        case (ir[7:6])
+            2'b01:   rel_base = pc;
+            2'b10:   rel_base = ac0[14:0];
+            default: rel_base = ac1[14:0];
+        endcase
+    end
 
     wire [14:0] base_addr = (ir[7:6] == 2'b00) ? 15'd0 : rel_base;
     wire [6:0]  offset_hi = (ir[7:6] == 2'b00) ? 7'b0 : {7{ir[15]}};
@@ -142,7 +148,6 @@ module nova_core (
             rx_sync      <= 1'b1;
             rx_baud_cnt  <= 7'd0;
             rx_bit_cnt   <= 4'd0;
-            rx_shift_reg <= 8'd0;
             rx_done_flag <= 1'b0;
         end else begin
             // input synchronizer
@@ -214,7 +219,6 @@ module nova_core (
         if (!rst_n) begin
             tx_baud_cnt  <= 7'd0;
             tx_bit_cnt   <= 4'd0;
-            tx_data      <= 8'd0;
             tx_done_flag <= 1'b0;
         end else begin
             // clear tx_done_flag when CPU writes DOA or issues CLR pulse
@@ -292,12 +296,10 @@ module nova_core (
         if (!rst_n) begin
             state               <= STATE_FETCH;
             pc                  <= 15'd0;
-            ir                  <= 16'd0;
             ac0                 <= 16'd0;
             ac1                 <= 16'd0;
             carry_flag          <= 1'b0;
             carry_intermediate <= 1'b0;
-            ea                  <= 15'd0;
             ea_valid            <= 1'b0;
         end else begin
             case (state)
