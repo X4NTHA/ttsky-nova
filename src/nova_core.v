@@ -255,37 +255,25 @@ module nova_core (
                                (ir[12] ? {ac_dst_val[3:0], ac_dst_val[15:4]} : shifted_res) :
                                {alu_result, ac_dst_val[15:4]};
 
-    // ALC skip condition eval (shared sub-expressions)
+    // ALC skip condition evaluation (4-way base condition folded with ir[13] polarity)
     wire carry_zero  = !shifted_cout;
     wire result_zero = (shifted_res == 16'h0000);
 
-    reg alc_skip;
+    reg base_skip;
     always @(*) begin
-        case (ir[15:13])
-            3'b000: alc_skip = 1'b0;                         // never
-            3'b001: alc_skip = 1'b1;                         // SKP (always)
-            3'b010: alc_skip = carry_zero;                   // SZC
-            3'b011: alc_skip = !carry_zero;                  // SNC
-            3'b100: alc_skip = result_zero;                  // SZR
-            3'b101: alc_skip = !result_zero;                 // SNR
-            3'b110: alc_skip = carry_zero | result_zero;     // SEZ
-            3'b111: alc_skip = !carry_zero & !result_zero;   // SBN
+        case (ir[15:14])
+            2'b00: base_skip = 1'b0;                         // 000=never, 001=SKP
+            2'b01: base_skip = carry_zero;                   // 010=SZC,   011=SNC
+            2'b10: base_skip = result_zero;                  // 100=SZR,   101=SNR
+            2'b11: base_skip = carry_zero | result_zero;     // 110=SEZ,   111=SBN
         endcase
     end
+    wire alc_skip = base_skip ^ ir[13];
 
-    // I/O device status and skip (using pre-decoded device signals)
+    // I/O device status and skip (2-way device condition folded with ir[8] polarity)
     wire io_dev_busy = is_kbd ? rx_busy : (is_prt ? tx_busy : 1'b0);
     wire io_dev_done = is_kbd ? rx_done_flag : (is_prt ? tx_done_flag : 1'b0);
-
-    reg io_skip;
-    always @(*) begin
-        case (ir[9:8])
-            2'b00: io_skip = io_dev_busy;  // SKPBN
-            2'b01: io_skip = !io_dev_busy; // SKPBZ
-            2'b10: io_skip = io_dev_done;  // SKPDN
-            2'b11: io_skip = !io_dev_done; // SKPDZ
-        endcase
-    end
+    wire io_skip     = (ir[9] ? io_dev_done : io_dev_busy) ^ ir[8];
 
     // FSM main sequential logic
     always @(posedge clk or negedge rst_n) begin
@@ -373,18 +361,13 @@ module nova_core (
                         exec_cycle <= exec_cycle + 2'd1;
                     end
 
-                    // dest AC: receives ALU result writeback
-                    if (ir[3])
+                    // dest AC receives ALU writeback, other AC rotates if source
+                    if (ir[3]) begin
                         ac1 <= next_dest_ac;
-                    else
+                        if (!ir[1]) ac0 <= {ac0[3:0], ac0[15:4]};
+                    end else begin
                         ac0 <= next_dest_ac;
-
-                    // source AC: rotate to present next nibble (skip if same as dest)
-                    if (ir[1] != ir[3]) begin
-                        if (ir[1])
-                            ac1 <= {ac1[3:0], ac1[15:4]};
-                        else
-                            ac0 <= {ac0[3:0], ac0[15:4]};
+                        if (ir[1]) ac1 <= {ac1[3:0], ac1[15:4]};
                     end
                 end
 
