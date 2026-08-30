@@ -130,9 +130,11 @@ module nova_core (
     wire      rx_busy = (rx_bit_cnt != 4'd0);
 
     // clear rx_done when CPU reads DIA from Keyboard, issues IORST, or c-clear
-    wire io_clear_rx_done = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11) &&
-                            ((is_cpu && ir[7:5] == 3'b101) ||
-                             (is_kbd && (ir[7:5] == 3'b001 || ir[9:8] == 2'b10)));
+    wire is_io_decode = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11);
+    wire is_iorst     = is_cpu && (ir[7:5] == 3'b101);
+
+    wire io_clear_rx_done = is_io_decode && (is_iorst || (is_kbd && (ir[7:5] == 3'b001 || ir[9:8] == 2'b10)));
+    wire io_clear_tx_done = is_io_decode && (is_iorst || (is_prt && ir[9:8] == 2'b10));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -183,19 +185,16 @@ module nova_core (
         end
     end
 
-    // UART TX: 8N1 serial frame transmitter (streamlined counter, no redundant state register)
+    // UART TX: 8N1 serial frame transmitter
     reg [6:0] tx_baud_cnt;
     reg [3:0] tx_bit_cnt;
     reg [9:0] tx_shift_reg;
     reg       tx_done_flag;
 
-    wire tx_busy = (tx_bit_cnt != 4'd0);
-    assign uart_tx = tx_busy ? tx_shift_reg[0] : 1'b1;
+    wire tx_busy   = (tx_bit_cnt != 4'd0);
+    assign uart_tx = tx_shift_reg[0];
 
-    wire tx_start_req = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11 && is_prt && ir[7:5] == 3'b010);
-    wire io_clear_tx_done = (state == STATE_DECODE && !ir[0] && ir[2:1] == 2'b11) &&
-                            ((is_cpu && ir[7:5] == 3'b101) ||
-                             (is_prt && ir[9:8] == 2'b10));
+    wire tx_start_req = is_io_decode && is_prt && (ir[7:5] == 3'b010);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
