@@ -28,14 +28,18 @@ module tt_um_x4ntha_nova (
     assign uo_out[0]   = uart_tx;
     assign uo_out[7:1] = blinkenlights;
 
+    // tri-state all bidirectional pins while in reset so the demoboard RP2354B
+    // (or an external flasher) can freely program the QSPI PMOD without bus contention
+    wire bus_oe = rst_n;
+
     // Bidirectional IO mapping (Tiny Tapeout QSPI Pmod)
     // uio[0]: Flash Chip Select (/CS0, Active Low)
     assign uio_out[0] = spi_cs0_n;
-    assign uio_oe[0]  = 1'b1;
+    assign uio_oe[0]  = bus_oe;
 
     // uio[1]: Flash/PSRAM MOSI (SIO0)
     assign uio_out[1] = spi_mosi;
-    assign uio_oe[1]  = 1'b1;
+    assign uio_oe[1]  = bus_oe;
 
     // uio[2]: Flash/PSRAM MISO (SIO1, Input)
     assign spi_miso   = uio_in[2];
@@ -44,23 +48,23 @@ module tt_um_x4ntha_nova (
 
     // uio[3]: SPI SCK (Serial Clock)
     assign uio_out[3] = spi_sck;
-    assign uio_oe[3]  = 1'b1;
+    assign uio_oe[3]  = bus_oe;
 
     // uio[4]: SIO2 / WP# (Driven HIGH to disable write-protect in 1-bit SPI mode)
     assign uio_out[4] = 1'b1;
-    assign uio_oe[4]  = 1'b1;
+    assign uio_oe[4]  = bus_oe;
 
     // uio[5]: SIO3 / HOLD# (Driven HIGH to disable hold in 1-bit SPI mode)
     assign uio_out[5] = 1'b1;
-    assign uio_oe[5]  = 1'b1;
+    assign uio_oe[5]  = bus_oe;
 
     // uio[6]: PSRAM Chip Select (/CS1, Active Low)
     assign uio_out[6] = spi_cs1_n;
-    assign uio_oe[6]  = 1'b1;
+    assign uio_oe[6]  = bus_oe;
 
-    // uio[7]: Unused Pmod Pin (Driven HIGH / Inactive)
-    assign uio_out[7] = 1'b1;
-    assign uio_oe[7]  = 1'b1;
+    // uio[7]: Unused Pmod Pin (tri-stated / Inactive)
+    assign uio_out[7] = 1'b0;
+    assign uio_oe[7]  = 1'b0;
 
     // Instantiate CPU Core
     nova_core cpu_core (

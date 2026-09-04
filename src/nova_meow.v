@@ -39,7 +39,7 @@ module nova_meow (
     /* verilator lint_on UNUSEDSIGNAL */
 
     assign data_out = shift_reg;
-    assign busy = (state != S_IDLE) || read_req || write_req;
+    assign busy = cs_active || read_req || write_req;
 
     // chip selects derived combinationally from addr[14] + transaction active
     // CS stays asserted through S_DONE for proper SPI hold time
